@@ -8,5 +8,20 @@ version = "0.1.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bin]]
+name = "crabase"
+path = "src/main.rs"
+
+[lib]
+name = "crabase_lib"
+path = "src/lib.rs"
+
 [dependencies]
 clap = { version = "4.3.14", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+walkdir = "2"
+thiserror = "1"
+
+[dev-dependencies]
+insta = "1"

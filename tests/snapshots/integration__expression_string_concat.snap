@@ -1,0 +1,5 @@
+---
+source: tests/integration.rs
+expression: val.to_display()
+---
+Hello World

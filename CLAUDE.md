@@ -80,3 +80,50 @@ cargo insta accept
 ## Version control
 
 This project uses jujutsu `jj` for version control
+
+## Project Structure
+
+The project is organized as a Rust workspace with both a binary and library crate:
+
+```
+src/
+  lib.rs          - Library entry point (exposes all modules as `crabase_lib`)
+  main.rs         - Binary entry point (CLI parsing + orchestration)
+  error.rs        - `CrabaseError` enum using thiserror
+  base_file.rs    - `.base` file YAML parsing: FilterNode, View, BaseFile
+  vault.rs        - Vault scanning: walks .md files, parses YAML frontmatter, extracts tags/links
+  filter.rs       - FilterNode evaluation against VaultFile
+  query.rs        - Query execution: filter + sort + column extraction
+  output.rs       - CSV output formatting
+  expr/
+    mod.rs        - Re-exports
+    lexer.rs      - Tokenizer for expression language
+    ast.rs        - AST node types (Expr, BinOp, UnaryOp)
+    parser.rs     - Recursive descent parser
+    eval.rs       - Evaluator with EvalContext and Value enum
+tests/
+  integration.rs  - Integration tests using insta snapshot testing
+  fixtures/
+    vault/        - Small test vault with .md files in Church/Sermons/ and Notes/
+    test.base     - Test .base file with folder filter and table view
+  snapshots/      - Insta snapshot files (committed)
+```
+
+## CLI Usage
+
+```
+crabase base:query file=<path-relative-to-vault> format=csv [vault=<vault_root>] [view=<view_name>]
+```
+
+- `file=` is the path to the `.base` file, relative to the vault root
+- `vault=` defaults to the current working directory
+- `view=` selects which view; defaults to the first view in the file
+- `format=csv` is the only supported output format
+
+## Key Design Decisions
+
+- `FilterNode` is an ADT (And/Or/Not/Expr) parsed from YAML
+- Expression language uses a recursive descent parser and a `Value` enum for runtime values
+- `VaultFile` aggregates all file metadata and parsed frontmatter
+- The `title` column is special: outputs `[[path/to/file.md| Display Text]]` (note the space after `|`)
+- YAML frontmatter wikilinks (e.g., `[[All Souls]]`) are stored as strings and output as-is in CSV

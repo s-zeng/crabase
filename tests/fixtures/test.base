@@ -1,0 +1,19 @@
+filters:
+  and:
+    - "file.inFolder(\"Church/Sermons\")"
+views:
+  - type: table
+    name: "Sermons"
+    order:
+      - date
+      - title
+      - session
+      - church
+      - series
+      - testament
+      - books
+      - preacher
+      - wc
+    groupBy:
+      property: date
+      direction: ASC
