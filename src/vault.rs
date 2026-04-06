@@ -33,31 +33,24 @@ pub struct VaultFile {
 impl VaultFile {
     /// Build the file_props HashMap for eval context
     pub fn file_props(&self) -> HashMap<String, Value> {
-        let mut props = HashMap::new();
-        props.insert("name".to_string(), Value::Str(self.name.clone()));
-        props.insert("path".to_string(), Value::Str(self.rel_path.clone()));
-        props.insert("folder".to_string(), Value::Str(self.folder.clone()));
-        props.insert("ext".to_string(), Value::Str(self.ext.clone()));
-        props.insert("size".to_string(), Value::Number(self.size as f64));
-        props.insert(
-            "tags".to_string(),
-            Value::List(
-                self.tags
-                    .iter()
-                    .map(|t| Value::Str(t.clone()))
-                    .collect(),
+        [
+            ("name", Value::Str(self.name.clone())),
+            ("path", Value::Str(self.rel_path.clone())),
+            ("folder", Value::Str(self.folder.clone())),
+            ("ext", Value::Str(self.ext.clone())),
+            ("size", Value::Number(self.size as f64)),
+            (
+                "tags",
+                Value::List(self.tags.iter().cloned().map(Value::Str).collect()),
             ),
-        );
-        props.insert(
-            "links".to_string(),
-            Value::List(
-                self.links
-                    .iter()
-                    .map(|l| Value::Str(l.clone()))
-                    .collect(),
+            (
+                "links",
+                Value::List(self.links.iter().cloned().map(Value::Str).collect()),
             ),
-        );
-        props
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
     }
 
     /// Build the note_props HashMap for eval context
@@ -81,9 +74,7 @@ fn yaml_to_value(v: &serde_yaml::Value) -> Value {
             }
         }
         serde_yaml::Value::String(s) => Value::Str(s.clone()),
-        serde_yaml::Value::Sequence(seq) => {
-            Value::List(seq.iter().map(yaml_to_value).collect())
-        }
+        serde_yaml::Value::Sequence(seq) => Value::List(seq.iter().map(yaml_to_value).collect()),
         serde_yaml::Value::Mapping(_) => Value::Null,
         serde_yaml::Value::Tagged(tagged) => yaml_to_value(&tagged.value),
     }
@@ -91,78 +82,69 @@ fn yaml_to_value(v: &serde_yaml::Value) -> Value {
 
 /// Scan a vault directory and return all .md files
 pub fn scan_vault(vault_root: &Path) -> Result<Vec<VaultFile>> {
-    let mut files = Vec::new();
-
-    for entry in WalkDir::new(vault_root)
+    WalkDir::new(vault_root)
         .follow_links(false)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
-    {
-        let abs_path = entry.path().to_path_buf();
-        let ext = abs_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_string();
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("md"))
+        .map(|entry| read_vault_file(vault_root, entry.path()))
+        .collect()
+}
 
-        if ext != "md" {
-            continue;
-        }
-
-        let rel_path = abs_path
-            .strip_prefix(vault_root)
-            .map_err(|e| CrabaseError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?
-            .to_string_lossy()
-            .replace('\\', "/");
-
-        let name = abs_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        let stem = abs_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        let folder = abs_path
-            .parent()
-            .and_then(|p| p.strip_prefix(vault_root).ok())
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
-
-        let metadata = std::fs::metadata(&abs_path)?;
-        let size = metadata.len();
-
-        let content = std::fs::read_to_string(&abs_path)?;
-        let (frontmatter, body) = parse_frontmatter(&content);
-        let mut tags = extract_frontmatter_tags(&frontmatter);
-        let inline_tags = extract_inline_tags(&body);
-        for t in inline_tags {
-            if !tags.contains(&t) {
-                tags.push(t);
+fn read_vault_file(vault_root: &Path, abs_path: &Path) -> Result<VaultFile> {
+    let abs_path = abs_path.to_path_buf();
+    let ext = abs_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_string();
+    let rel_path = abs_path
+        .strip_prefix(vault_root)
+        .map_err(|e| CrabaseError::Io(std::io::Error::other(e.to_string())))?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let name = abs_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    let stem = abs_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let folder = abs_path
+        .parent()
+        .and_then(|p| p.strip_prefix(vault_root).ok())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let size = std::fs::metadata(&abs_path)?.len();
+    let content = std::fs::read_to_string(&abs_path)?;
+    let (frontmatter, body) = parse_frontmatter(&content);
+    let tags = extract_frontmatter_tags(&frontmatter)
+        .into_iter()
+        .chain(extract_inline_tags(&body))
+        .fold(Vec::new(), |mut acc, tag| {
+            if !acc.contains(&tag) {
+                acc.push(tag);
             }
-        }
-        let links = extract_wikilinks(&content);
-
-        files.push(VaultFile {
-            abs_path,
-            rel_path,
-            name,
-            stem,
-            ext,
-            folder,
-            size,
-            frontmatter,
-            tags,
-            links,
+            acc
         });
-    }
+    let links = extract_wikilinks(&content);
 
-    Ok(files)
+    Ok(VaultFile {
+        abs_path,
+        rel_path,
+        name,
+        stem,
+        ext,
+        folder,
+        size,
+        frontmatter,
+        tags,
+        links,
+    })
 }
 
 /// Parse YAML frontmatter from markdown content.
@@ -203,7 +185,8 @@ fn parse_frontmatter(content: &str) -> (HashMap<String, serde_yaml::Value>, Stri
         String::new()
     };
 
-    let map: HashMap<String, serde_yaml::Value> = serde_yaml::from_str(yaml_str).unwrap_or_default();
+    let map: HashMap<String, serde_yaml::Value> =
+        serde_yaml::from_str(yaml_str).unwrap_or_default();
     (map, body)
 }
 
@@ -226,28 +209,35 @@ fn extract_frontmatter_tags(frontmatter: &HashMap<String, serde_yaml::Value>) ->
 
 /// Extract inline tags from body content (lines containing #tag patterns)
 fn extract_inline_tags(body: &str) -> Vec<String> {
+    body.lines()
+        .flat_map(extract_inline_tags_from_line)
+        .collect()
+}
+
+fn extract_inline_tags_from_line(line: &str) -> Vec<String> {
+    let mut chars = line.char_indices().peekable();
     let mut tags = Vec::new();
-    for line in body.lines() {
-        // Simple inline tag extraction: find #word patterns
-        let mut chars = line.char_indices().peekable();
-        while let Some((i, c)) = chars.next() {
-            if c == '#' {
-                // Make sure it's not inside a wikilink or code
-                let tag: String = chars
-                    .by_ref()
-                    .take_while(|(_, c)| c.is_alphanumeric() || *c == '/' || *c == '_' || *c == '-')
-                    .map(|(_, c)| c)
-                    .collect();
-                if !tag.is_empty() && tag.chars().next().map_or(false, |c| c.is_alphabetic()) {
-                    // Only add if preceded by whitespace or start of line
-                    let preceded_by_space = i == 0 || line[..i].ends_with(char::is_whitespace);
-                    if preceded_by_space {
-                        tags.push(tag);
-                    }
-                }
-            }
+
+    while let Some((i, c)) = chars.next() {
+        if c != '#' {
+            continue;
+        }
+
+        let tag: String = chars
+            .by_ref()
+            .take_while(|(_, c)| c.is_alphanumeric() || *c == '/' || *c == '_' || *c == '-')
+            .map(|(_, c)| c)
+            .collect();
+
+        let is_valid_tag = !tag.is_empty()
+            && tag.chars().next().is_some_and(char::is_alphabetic)
+            && (i == 0 || line[..i].ends_with(char::is_whitespace));
+
+        if is_valid_tag {
+            tags.push(tag);
         }
     }
+
     tags
 }
 

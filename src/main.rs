@@ -24,7 +24,9 @@ fn run() -> Result<()> {
 
     // Expect: crabase base:query <key=value>...
     if raw_args.len() < 2 {
-        eprintln!("Usage: crabase base:query file=<path> format=csv [vault=<vault_root>] [view=<view_name>]");
+        eprintln!(
+            "Usage: crabase base:query file=<path> format=csv [vault=<vault_root>] [view=<view_name>]"
+        );
         return Err(CrabaseError::MissingArg("subcommand".to_string()));
     }
 
@@ -62,7 +64,11 @@ fn run() -> Result<()> {
     let base_content = std::fs::read_to_string(&base_file_path).map_err(|e| {
         CrabaseError::Io(std::io::Error::new(
             e.kind(),
-            format!("Cannot read base file '{}': {}", base_file_path.display(), e),
+            format!(
+                "Cannot read base file '{}': {}",
+                base_file_path.display(),
+                e
+            ),
         ))
     })?;
 

@@ -3,5 +3,5 @@ pub mod eval;
 pub mod lexer;
 pub mod parser;
 
-pub use eval::{eval, EvalContext};
+pub use eval::{EvalContext, eval};
 pub use parser::parse;

@@ -3,10 +3,10 @@ use std::path::Path;
 
 use crate::base_file::{BaseFile, SortDirection, View};
 use crate::error::Result;
-use crate::expr::{eval, parse, EvalContext};
 use crate::expr::eval::compare_values;
+use crate::expr::{EvalContext, eval, parse};
 use crate::filter::file_passes_filters;
-use crate::vault::{scan_vault, VaultFile};
+use crate::vault::{VaultFile, scan_vault};
 
 /// A single row of query results
 #[derive(Debug)]
@@ -21,9 +21,7 @@ pub fn execute_query(
     view: &View,
 ) -> Result<Vec<ResultRow>> {
     let files = scan_vault(vault_root)?;
-
-    // Filter files
-    let mut matched: Vec<VaultFile> = files
+    let matched = files
         .into_iter()
         .filter_map(|file| {
             match file_passes_filters(
@@ -34,88 +32,71 @@ pub fn execute_query(
             ) {
                 Ok(true) => Some(Ok(file)),
                 Ok(false) => None,
-                Err(e) => Some(Err(e)),
+                Err(error) => Some(Err(error)),
             }
         })
         .collect::<Result<Vec<_>>>()?;
-
-    // Sort: primary sort by groupBy, then additional sort keys
-    sort_files(&mut matched, view);
-
-    // Apply limit
-    if let Some(limit) = view.limit {
-        matched.truncate(limit);
-    }
-
-    // Extract columns
     let columns = view.order.as_deref().unwrap_or(&[]);
-    let rows = matched
-        .iter()
-        .map(|file| {
-            let cols = columns
-                .iter()
-                .map(|col| extract_column(file, col, &base_file.formulas))
-                .collect::<Result<Vec<_>>>()?;
-            Ok(ResultRow { columns: cols })
-        })
-        .collect::<Result<Vec<_>>>()?;
 
-    Ok(rows)
+    sort_files(matched, view)
+        .into_iter()
+        .take(view.limit.unwrap_or(usize::MAX))
+        .map(|file| {
+            columns
+                .iter()
+                .map(|column| extract_column(&file, column, &base_file.formulas))
+                .collect::<Result<Vec<_>>>()
+                .map(|columns| ResultRow { columns })
+        })
+        .collect()
+}
+
+fn sort_keys(view: &View) -> Vec<(&str, &SortDirection)> {
+    view.group_by
+        .iter()
+        .map(|group_by| (group_by.property.as_str(), &group_by.direction))
+        .chain(view.sort.iter().flat_map(|keys| {
+            keys.iter()
+                .map(|key| (key.property.as_str(), &key.direction))
+        }))
+        .collect()
 }
 
 /// Sort files according to view's groupBy and sort fields
-fn sort_files(files: &mut Vec<VaultFile>, view: &View) {
-    // Build sort keys: groupBy first, then sort array
-    let mut sort_keys: Vec<(String, SortDirection)> = Vec::new();
-
-    if let Some(group_by) = &view.group_by {
-        sort_keys.push((group_by.property.clone(), group_by.direction.clone()));
-    }
-
-    if let Some(sort) = &view.sort {
-        for key in sort {
-            sort_keys.push((key.property.clone(), key.direction.clone()));
-        }
-    }
-
+fn sort_files(files: Vec<VaultFile>, view: &View) -> Vec<VaultFile> {
+    let sort_keys = sort_keys(view);
     if sort_keys.is_empty() {
-        return;
+        return files;
     }
 
-    files.sort_by(|a, b| {
-        for (prop, direction) in &sort_keys {
-            let a_val = get_sort_value(a, prop);
-            let b_val = get_sort_value(b, prop);
-            let ord = compare_values(&a_val, &b_val);
-            let ord = match direction {
-                SortDirection::Asc => ord,
-                SortDirection::Desc => ord.reverse(),
-            };
-            if ord != std::cmp::Ordering::Equal {
-                return ord;
-            }
-        }
-        std::cmp::Ordering::Equal
+    let mut sorted = files;
+    sorted.sort_by(|left, right| {
+        sort_keys
+            .iter()
+            .map(|(property, direction)| {
+                let ord = compare_values(
+                    &get_sort_value(left, property),
+                    &get_sort_value(right, property),
+                );
+                match direction {
+                    SortDirection::Asc => ord,
+                    SortDirection::Desc => ord.reverse(),
+                }
+            })
+            .find(|ord| *ord != std::cmp::Ordering::Equal)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
+    sorted
 }
 
 fn get_sort_value(file: &VaultFile, prop: &str) -> crate::expr::eval::Value {
     use crate::expr::eval::Value;
 
-    // Handle file properties
-    if prop.starts_with("file.") {
-        let field = &prop[5..];
-        return file.file_props().get(field).cloned().unwrap_or(Value::Null);
+    match prop.split_once('.') {
+        Some(("file", field)) => file.file_props().get(field).cloned().unwrap_or(Value::Null),
+        Some(("note", field)) => file.note_props().get(field).cloned().unwrap_or(Value::Null),
+        _ => file.note_props().get(prop).cloned().unwrap_or(Value::Null),
     }
-
-    // Handle note properties
-    if prop.starts_with("note.") {
-        let field = &prop[5..];
-        return file.note_props().get(field).cloned().unwrap_or(Value::Null);
-    }
-
-    // Bare identifier = note property
-    file.note_props().get(prop).cloned().unwrap_or(Value::Null)
 }
 
 /// Extract a column value for a file
@@ -124,7 +105,6 @@ fn extract_column(
     column: &str,
     formulas: &HashMap<String, String>,
 ) -> Result<serde_yaml::Value> {
-    // Special "title" column
     if column == "title" {
         let display = file
             .frontmatter
@@ -132,33 +112,35 @@ fn extract_column(
             .and_then(|v| v.as_str())
             .unwrap_or(&file.stem)
             .to_string();
-        let wikilink = format!("[[{}| {}]]", file.rel_path, display);
-        return Ok(serde_yaml::Value::String(wikilink));
+        return Ok(serde_yaml::Value::String(format!(
+            "[[{}| {}]]",
+            file.rel_path, display
+        )));
     }
 
-    // file.* properties
-    if column.starts_with("file.") {
-        let field = &column[5..];
-        let file_props = file.file_props();
-        let val = file_props.get(field).cloned().unwrap_or(crate::expr::eval::Value::Null);
-        return Ok(value_to_yaml(&val));
+    if let Some(field) = column.strip_prefix("file.") {
+        let value = file
+            .file_props()
+            .get(field)
+            .cloned()
+            .unwrap_or(crate::expr::eval::Value::Null);
+        return Ok(value_to_yaml(&value));
     }
 
-    // formula.* properties
-    if column.starts_with("formula.") {
-        let formula_name = &column[8..];
-        if let Some(expr_str) = formulas.get(formula_name) {
-            let ctx = EvalContext::new(file.file_props(), file.note_props(), formulas.clone());
-            let ast = parse(expr_str)?;
-            let val = eval(&ast, &ctx)?;
-            return Ok(value_to_yaml(&val));
-        }
-        return Ok(serde_yaml::Value::Null);
+    if let Some(formula_name) = column.strip_prefix("formula.") {
+        return formulas
+            .get(formula_name)
+            .map(|expr_str| {
+                let ctx = EvalContext::new(file.file_props(), file.note_props(), formulas.clone());
+                let ast = parse(expr_str)?;
+                let value = eval(&ast, &ctx)?;
+                Ok(value_to_yaml(&value))
+            })
+            .transpose()
+            .map(|value| value.unwrap_or(serde_yaml::Value::Null));
     }
 
-    // note.* properties
-    if column.starts_with("note.") {
-        let field = &column[5..];
+    if let Some(field) = column.strip_prefix("note.") {
         return Ok(file
             .frontmatter
             .get(field)
@@ -166,7 +148,6 @@ fn extract_column(
             .unwrap_or(serde_yaml::Value::Null));
     }
 
-    // Bare identifier = note property
     Ok(file
         .frontmatter
         .get(column)
@@ -176,18 +157,11 @@ fn extract_column(
 
 fn value_to_yaml(val: &crate::expr::eval::Value) -> serde_yaml::Value {
     use crate::expr::eval::Value;
+
     match val {
         Value::Null => serde_yaml::Value::Null,
         Value::Bool(b) => serde_yaml::Value::Bool(*b),
-        Value::Number(n) => {
-            if n.fract() == 0.0 && n.abs() < 1e15 {
-                serde_yaml::Value::Number(serde_yaml::Number::from(*n as i64))
-            } else {
-                serde_yaml::Value::Number(
-                    serde_yaml::Number::from(serde_yaml::Number::from(*n as i64)),
-                )
-            }
-        }
+        Value::Number(n) => serde_yaml::to_value(*n).unwrap_or(serde_yaml::Value::Null),
         Value::Str(s) => serde_yaml::Value::String(s.clone()),
         Value::List(items) => {
             serde_yaml::Value::Sequence(items.iter().map(value_to_yaml).collect())

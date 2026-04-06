@@ -25,20 +25,14 @@ pub enum Expr {
         object: Box<Expr>,
         field: String,
     },
-    // Method call: expr.method(args...)
-    MethodCall {
-        object: Box<Expr>,
-        method: String,
-        args: Vec<Expr>,
-    },
     // Index access: expr[index]
     Index {
         object: Box<Expr>,
         index: Box<Expr>,
     },
-    // Function call: name(args...)
-    FuncCall {
-        name: String,
+    // Function or method call: callee(args...)
+    Call {
+        callee: Box<Expr>,
         args: Vec<Expr>,
     },
 }

@@ -34,7 +34,8 @@ pub fn yaml_value_to_csv_str(val: &serde_yaml::Value) -> String {
 
 /// Write a single CSV field (quoting if necessary)
 fn write_csv_field(out: &mut dyn Write, field: &str) -> std::io::Result<()> {
-    let needs_quoting = field.contains(',') || field.contains('"') || field.contains('\n') || field.contains('\r');
+    let needs_quoting =
+        field.contains(',') || field.contains('"') || field.contains('\n') || field.contains('\r');
     if needs_quoting {
         // Escape quotes by doubling them
         let escaped = field.replace('"', "\"\"");

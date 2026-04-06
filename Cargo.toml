@@ -25,3 +25,4 @@ thiserror = "1"
 
 [dev-dependencies]
 insta = "1"
+proptest = "1"

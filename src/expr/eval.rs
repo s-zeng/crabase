@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use crate::error::{CrabaseError, Result};
 use crate::expr::ast::{BinOp, Expr, UnaryOp};
+use std::collections::HashMap;
 
 /// Runtime value in the expression evaluator
 #[derive(Debug, Clone, PartialEq)]
@@ -93,10 +93,7 @@ impl EvalContext {
 
     fn get_variable(&self, name: &str) -> Value {
         // Try note props first, then file props
-        if let Some(v) = self.note_props.get(name) {
-            return v.clone();
-        }
-        Value::Null
+        self.note_props.get(name).cloned().unwrap_or(Value::Null)
     }
 }
 
@@ -122,10 +119,6 @@ pub fn eval(expr: &Expr, ctx: &EvalContext) -> Result<Value> {
             Ok(obj_val)
         }
 
-        Expr::MethodCall { object, method, args } => {
-            eval_method_call(object, method, args, ctx)
-        }
-
         Expr::Index { object, index } => {
             let obj = eval(object, ctx)?;
             let idx = eval(index, ctx)?;
@@ -145,13 +138,15 @@ pub fn eval(expr: &Expr, ctx: &EvalContext) -> Result<Value> {
             }
         }
 
-        Expr::FuncCall { name, args } => {
-            eval_func_call(name, args, ctx)
-        }
+        Expr::Call { callee, args } => match callee.as_ref() {
+            Expr::Ident(name) => eval_func_call(name, args, ctx),
+            Expr::Member { object, field } => eval_method_call(object, field, args, ctx),
+            other => Err(CrabaseError::ExprEval(format!(
+                "Expression is not callable: {other:?}"
+            ))),
+        },
 
-        Expr::BinOp { op, left, right } => {
-            eval_binop(op, left, right, ctx)
-        }
+        Expr::BinOp { op, left, right } => eval_binop(op, left, right, ctx),
 
         Expr::UnaryOp { op, operand } => {
             let val = eval(operand, ctx)?;
@@ -159,10 +154,7 @@ pub fn eval(expr: &Expr, ctx: &EvalContext) -> Result<Value> {
                 UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
                 UnaryOp::Neg => match val {
                     Value::Number(n) => Ok(Value::Number(-n)),
-                    other => Err(CrabaseError::ExprEval(format!(
-                        "Cannot negate {:?}",
-                        other
-                    ))),
+                    other => Err(CrabaseError::ExprEval(format!("Cannot negate {:?}", other))),
                 },
             }
         }
@@ -197,7 +189,12 @@ fn eval_object_access(object: &Expr, field: &str, ctx: &EvalContext) -> Result<V
     }
 }
 
-fn eval_method_call(object: &Expr, method: &str, args: &[Expr], ctx: &EvalContext) -> Result<Value> {
+fn eval_method_call(
+    object: &Expr,
+    method: &str,
+    args: &[Expr],
+    ctx: &EvalContext,
+) -> Result<Value> {
     // Special case for "file" object methods
     if let Expr::Ident(obj_name) = object {
         if obj_name == "file" {
@@ -220,21 +217,39 @@ fn eval_method_call(object: &Expr, method: &str, args: &[Expr], ctx: &EvalContex
         (Value::Str(s), "contains") => {
             let needle = eval_args
                 .first()
-                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("");
             Ok(Value::Bool(s.contains(needle)))
         }
         (Value::Str(s), "startsWith") => {
             let prefix = eval_args
                 .first()
-                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("");
             Ok(Value::Bool(s.starts_with(prefix)))
         }
         (Value::Str(s), "endsWith") => {
             let suffix = eval_args
                 .first()
-                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("");
             Ok(Value::Bool(s.ends_with(suffix)))
         }
@@ -247,9 +262,7 @@ fn eval_method_call(object: &Expr, method: &str, args: &[Expr], ctx: &EvalContex
                     let mut chars = w.chars();
                     match chars.next() {
                         None => String::new(),
-                        Some(first) => {
-                            first.to_uppercase().to_string() + chars.as_str()
-                        }
+                        Some(first) => first.to_uppercase().to_string() + chars.as_str(),
                     }
                 })
                 .collect::<Vec<_>>()
@@ -265,21 +278,39 @@ fn eval_method_call(object: &Expr, method: &str, args: &[Expr], ctx: &EvalContex
         (Value::Str(_), "isType") => {
             let type_name = eval_args
                 .first()
-                .and_then(|v| if let Value::Str(t) = v { Some(t.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(t) = v {
+                        Some(t.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("");
             Ok(Value::Bool(type_name == "string"))
         }
         (Value::Str(s), "slice") => {
             let start = eval_args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as usize;
             let chars: Vec<char> = s.chars().collect();
-            let end = eval_args.get(1).and_then(|v| v.as_number()).map(|n| n as usize).unwrap_or(chars.len());
-            let sliced: String = chars[start.min(chars.len())..end.min(chars.len())].iter().collect();
+            let end = eval_args
+                .get(1)
+                .and_then(|v| v.as_number())
+                .map(|n| n as usize)
+                .unwrap_or(chars.len());
+            let sliced: String = chars[start.min(chars.len())..end.min(chars.len())]
+                .iter()
+                .collect();
             Ok(Value::Str(sliced))
         }
         (Value::Str(s), "split") => {
             let sep = eval_args
                 .first()
-                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or(",");
             let parts: Vec<Value> = s.split(sep).map(|p| Value::Str(p.to_string())).collect();
             Ok(Value::List(parts))
@@ -291,17 +322,30 @@ fn eval_method_call(object: &Expr, method: &str, args: &[Expr], ctx: &EvalContex
         (Value::Str(s), "replace") => {
             let pattern = eval_args
                 .first()
-                .and_then(|v| if let Value::Str(s) = v { Some(s.clone()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or_default();
             let replacement = eval_args
                 .get(1)
-                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("");
             Ok(Value::Str(s.replace(&pattern, replacement)))
         }
         (Value::Str(s), "toFixed") => {
             if let Ok(n) = s.parse::<f64>() {
-                let precision = eval_args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as usize;
+                let precision =
+                    eval_args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as usize;
                 Ok(Value::Str(format!("{:.prec$}", n, prec = precision)))
             } else {
                 Ok(Value::Str(s.clone()))
@@ -329,7 +373,13 @@ fn eval_method_call(object: &Expr, method: &str, args: &[Expr], ctx: &EvalContex
         (Value::Number(_), "isType") => {
             let type_name = eval_args
                 .first()
-                .and_then(|v| if let Value::Str(t) = v { Some(t.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(t) = v {
+                        Some(t.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("");
             Ok(Value::Bool(type_name == "number"))
         }
@@ -339,25 +389,33 @@ fn eval_method_call(object: &Expr, method: &str, args: &[Expr], ctx: &EvalContex
         (Value::Bool(_), "isType") => {
             let type_name = eval_args
                 .first()
-                .and_then(|v| if let Value::Str(t) = v { Some(t.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(t) = v {
+                        Some(t.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("");
             Ok(Value::Bool(type_name == "boolean"))
         }
         // List methods
         (Value::List(items), "contains") => {
             let needle = eval_args.first().cloned().unwrap_or(Value::Null);
-            Ok(Value::Bool(items.iter().any(|item| values_equal(item, &needle))))
+            Ok(Value::Bool(
+                items.iter().any(|item| values_equal(item, &needle)),
+            ))
         }
         (Value::List(items), "containsAll") => {
-            let result = eval_args.iter().all(|needle| {
-                items.iter().any(|item| values_equal(item, needle))
-            });
+            let result = eval_args
+                .iter()
+                .all(|needle| items.iter().any(|item| values_equal(item, needle)));
             Ok(Value::Bool(result))
         }
         (Value::List(items), "containsAny") => {
-            let result = eval_args.iter().any(|needle| {
-                items.iter().any(|item| values_equal(item, needle))
-            });
+            let result = eval_args
+                .iter()
+                .any(|needle| items.iter().any(|item| values_equal(item, needle)));
             Ok(Value::Bool(result))
         }
         (Value::List(items), "length") => Ok(Value::Number(items.len() as f64)),
@@ -365,52 +423,67 @@ fn eval_method_call(object: &Expr, method: &str, args: &[Expr], ctx: &EvalContex
         (Value::List(items), "join") => {
             let sep = eval_args
                 .first()
-                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or(", ");
-            let joined = items.iter().map(|v| v.to_display()).collect::<Vec<_>>().join(sep);
+            let joined = items
+                .iter()
+                .map(|v| v.to_display())
+                .collect::<Vec<_>>()
+                .join(sep);
             Ok(Value::Str(joined))
         }
-        (Value::List(items), "reverse") => {
-            let mut reversed = items.clone();
-            reversed.reverse();
-            Ok(Value::List(reversed))
-        }
+        (Value::List(items), "reverse") => Ok(Value::List(items.iter().cloned().rev().collect())),
         (Value::List(items), "sort") => {
             let mut sorted = items.clone();
             sorted.sort_by(|a, b| compare_values(a, b));
             Ok(Value::List(sorted))
         }
-        (Value::List(items), "unique") => {
-            let mut seen = Vec::new();
-            let mut unique = Vec::new();
-            for item in items {
-                if !seen.iter().any(|s| values_equal(s, item)) {
-                    seen.push(item.clone());
-                    unique.push(item.clone());
+        (Value::List(items), "unique") => Ok(Value::List(items.iter().cloned().fold(
+            Vec::new(),
+            |mut acc, item| {
+                if !acc.iter().any(|existing| values_equal(existing, &item)) {
+                    acc.push(item);
                 }
-            }
-            Ok(Value::List(unique))
-        }
-        (Value::List(items), "flat") => {
-            let mut flat = Vec::new();
-            for item in items {
-                match item {
-                    Value::List(inner) => flat.extend(inner.iter().cloned()),
-                    other => flat.push(other.clone()),
-                }
-            }
-            Ok(Value::List(flat))
-        }
+                acc
+            },
+        ))),
+        (Value::List(items), "flat") => Ok(Value::List(
+            items
+                .iter()
+                .flat_map(|item| match item {
+                    Value::List(inner) => inner.clone(),
+                    other => vec![other.clone()],
+                })
+                .collect(),
+        )),
         (Value::List(items), "slice") => {
             let start = eval_args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as usize;
-            let end = eval_args.get(1).and_then(|v| v.as_number()).map(|n| n as usize).unwrap_or(items.len());
-            Ok(Value::List(items[start.min(items.len())..end.min(items.len())].to_vec()))
+            let end = eval_args
+                .get(1)
+                .and_then(|v| v.as_number())
+                .map(|n| n as usize)
+                .unwrap_or(items.len());
+            Ok(Value::List(
+                items[start.min(items.len())..end.min(items.len())].to_vec(),
+            ))
         }
         (Value::List(_), "isTruthy") => Ok(Value::Bool(obj_val.is_truthy())),
         (Value::List(_), "isType") => {
             let type_name = eval_args
                 .first()
-                .and_then(|v| if let Value::Str(t) = v { Some(t.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(t) = v {
+                        Some(t.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("");
             Ok(Value::Bool(type_name == "list"))
         }
@@ -451,17 +524,35 @@ fn eval_file_method(method: &str, args: &[Value], ctx: &EvalContext) -> Result<V
         "inFolder" => {
             let folder_arg = args
                 .first()
-                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("");
             let file_folder = ctx
                 .file_props
                 .get("folder")
-                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("");
             let file_path = ctx
                 .file_props
                 .get("path")
-                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("");
 
             let in_folder = file_path.starts_with(&format!("{}/", folder_arg))
@@ -498,18 +589,34 @@ fn eval_file_method(method: &str, args: &[Value], ctx: &EvalContext) -> Result<V
         "hasProperty" => {
             let prop_name = args
                 .first()
-                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("");
             Ok(Value::Bool(ctx.note_props.contains_key(prop_name)))
         }
         "asLink" => {
-            let display = args
-                .first()
-                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None });
+            let display = args.first().and_then(|v| {
+                if let Value::Str(s) = v {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            });
             let path = ctx
                 .file_props
                 .get("path")
-                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("");
             let link = if let Some(d) = display {
                 format!("[[{}|{}]]", path, d)
@@ -579,11 +686,21 @@ fn eval_func_call(name: &str, args: &[Expr], ctx: &EvalContext) -> Result<Value>
         "link" => {
             let path = eval_args
                 .first()
-                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("");
-            let display = eval_args
-                .get(1)
-                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None });
+            let display = eval_args.get(1).and_then(|v| {
+                if let Value::Str(s) = v {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            });
             let link = if let Some(d) = display {
                 format!("[[{}|{}]]", path, d)
             } else {
@@ -636,10 +753,22 @@ fn eval_binop(op: &BinOp, left: &Expr, right: &Expr, ctx: &EvalContext) -> Resul
         BinOp::Mod => eval_arith(lval, rval, |a, b| a % b, "modulo"),
         BinOp::Eq => Ok(Value::Bool(values_equal(&lval, &rval))),
         BinOp::Ne => Ok(Value::Bool(!values_equal(&lval, &rval))),
-        BinOp::Gt => Ok(Value::Bool(matches!(compare_values(&lval, &rval), std::cmp::Ordering::Greater))),
-        BinOp::Lt => Ok(Value::Bool(matches!(compare_values(&lval, &rval), std::cmp::Ordering::Less))),
-        BinOp::Ge => Ok(Value::Bool(!matches!(compare_values(&lval, &rval), std::cmp::Ordering::Less))),
-        BinOp::Le => Ok(Value::Bool(!matches!(compare_values(&lval, &rval), std::cmp::Ordering::Greater))),
+        BinOp::Gt => Ok(Value::Bool(matches!(
+            compare_values(&lval, &rval),
+            std::cmp::Ordering::Greater
+        ))),
+        BinOp::Lt => Ok(Value::Bool(matches!(
+            compare_values(&lval, &rval),
+            std::cmp::Ordering::Less
+        ))),
+        BinOp::Ge => Ok(Value::Bool(!matches!(
+            compare_values(&lval, &rval),
+            std::cmp::Ordering::Less
+        ))),
+        BinOp::Le => Ok(Value::Bool(!matches!(
+            compare_values(&lval, &rval),
+            std::cmp::Ordering::Greater
+        ))),
         BinOp::And | BinOp::Or => unreachable!("handled above"),
     }
 }
@@ -661,7 +790,12 @@ fn eval_add(lval: Value, rval: Value) -> Result<Value> {
     }
 }
 
-fn eval_arith(lval: Value, rval: Value, op: impl Fn(f64, f64) -> f64, op_name: &str) -> Result<Value> {
+fn eval_arith(
+    lval: Value,
+    rval: Value,
+    op: impl Fn(f64, f64) -> f64,
+    op_name: &str,
+) -> Result<Value> {
     match (lval.as_number(), rval.as_number()) {
         (Some(a), Some(b)) => Ok(Value::Number(op(a, b))),
         _ => Err(CrabaseError::ExprEval(format!(
@@ -677,7 +811,9 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Number(a), Value::Number(b)) => a == b,
         (Value::Str(a), Value::Str(b)) => a == b,
-        (Value::List(a), Value::List(b)) => a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y)),
+        (Value::List(a), Value::List(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
+        }
         // Cross-type numeric comparison
         (Value::Number(a), Value::Str(b)) => b.parse::<f64>().map_or(false, |n| *a == n),
         (Value::Str(a), Value::Number(b)) => a.parse::<f64>().map_or(false, |n| n == *b),
@@ -687,7 +823,9 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
 
 pub fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
-        (Value::Number(a), Value::Number(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+        (Value::Number(a), Value::Number(b)) => {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        }
         (Value::Str(a), Value::Str(b)) => a.cmp(b),
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
         // Try numeric cross-type

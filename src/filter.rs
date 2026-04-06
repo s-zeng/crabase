@@ -1,6 +1,6 @@
 use crate::base_file::FilterNode;
 use crate::error::Result;
-use crate::expr::{eval, parse, EvalContext};
+use crate::expr::{EvalContext, eval, parse};
 use crate::vault::VaultFile;
 use std::collections::HashMap;
 
@@ -16,31 +16,27 @@ pub fn eval_filter(
 
 fn eval_filter_with_ctx(node: &FilterNode, ctx: &EvalContext) -> Result<bool> {
     match node {
-        FilterNode::And(children) => {
-            for child in children {
-                if !eval_filter_with_ctx(child, ctx)? {
-                    return Ok(false);
-                }
+        FilterNode::And(children) => children.iter().try_fold(true, |acc, child| {
+            if !acc {
+                Ok(false)
+            } else {
+                eval_filter_with_ctx(child, ctx)
             }
-            Ok(true)
-        }
-        FilterNode::Or(children) => {
-            for child in children {
-                if eval_filter_with_ctx(child, ctx)? {
-                    return Ok(true);
-                }
+        }),
+        FilterNode::Or(children) => children.iter().try_fold(false, |acc, child| {
+            if acc {
+                Ok(true)
+            } else {
+                eval_filter_with_ctx(child, ctx)
             }
-            Ok(false)
-        }
-        FilterNode::Not(children) => {
-            // "Not" means none of the children are true (i.e., NOT OR)
-            for child in children {
-                if eval_filter_with_ctx(child, ctx)? {
-                    return Ok(false);
-                }
+        }),
+        FilterNode::Not(children) => children.iter().try_fold(true, |acc, child| {
+            if !acc {
+                Ok(false)
+            } else {
+                eval_filter_with_ctx(child, ctx).map(|matches| !matches)
             }
-            Ok(true)
-        }
+        }),
         FilterNode::Expr(expr_str) => {
             let ast = parse(expr_str)?;
             let val = eval(&ast, ctx)?;
@@ -58,18 +54,14 @@ pub fn file_passes_filters(
     formulas: &HashMap<String, String>,
 ) -> Result<bool> {
     let ctx = EvalContext::new(file.file_props(), file.note_props(), formulas.clone());
-
-    if let Some(global) = global_filter {
-        if !eval_filter_with_ctx(global, &ctx)? {
-            return Ok(false);
-        }
-    }
-
-    if let Some(view) = view_filter {
-        if !eval_filter_with_ctx(view, &ctx)? {
-            return Ok(false);
-        }
-    }
-
-    Ok(true)
+    [global_filter, view_filter]
+        .into_iter()
+        .flatten()
+        .try_fold(true, |acc, filter| {
+            if !acc {
+                Ok(false)
+            } else {
+                eval_filter_with_ctx(filter, &ctx)
+            }
+        })
 }

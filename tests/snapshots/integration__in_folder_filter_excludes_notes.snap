@@ -1,0 +1,6 @@
+---
+source: tests/integration.rs
+assertion_line: 43
+expression: "(!output.contains(\"random-note\")).to_string()"
+---
+true

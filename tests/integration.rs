@@ -1,3 +1,4 @@
+use proptest::prelude::*;
 use std::path::PathBuf;
 
 fn fixtures_vault() -> PathBuf {
@@ -39,8 +40,7 @@ fn test_in_folder_filter_excludes_notes() {
     let vault = fixtures_vault();
     let base_path = fixtures_base("test.base");
     let output = run_query(&vault, &base_path, None);
-    // The random note in Notes/ should not be in the output
-    assert!(!output.contains("random-note"), "random-note should be excluded by folder filter");
+    insta::assert_snapshot!((!output.contains("random-note")).to_string());
 }
 
 #[test]
@@ -67,14 +67,21 @@ fn test_filter_node_and() {
 
 #[test]
 fn test_expression_comparison() {
-    use crabase_lib::expr::{eval, parse, EvalContext};
+    use crabase_lib::expr::{EvalContext, eval, parse};
     use std::collections::HashMap;
 
-    let ctx = EvalContext::new(HashMap::new(), {
-        let mut m = HashMap::new();
-        m.insert("session".to_string(), crabase_lib::expr::eval::Value::Number(1130.0));
-        m
-    }, HashMap::new());
+    let ctx = EvalContext::new(
+        HashMap::new(),
+        {
+            let mut m = HashMap::new();
+            m.insert(
+                "session".to_string(),
+                crabase_lib::expr::eval::Value::Number(1130.0),
+            );
+            m
+        },
+        HashMap::new(),
+    );
 
     let ast = parse("session == 1130").expect("parse");
     let val = eval(&ast, &ctx).expect("eval");
@@ -83,16 +90,62 @@ fn test_expression_comparison() {
 
 #[test]
 fn test_expression_string_concat() {
-    use crabase_lib::expr::{eval, parse, EvalContext};
+    use crabase_lib::expr::{EvalContext, eval, parse};
     use std::collections::HashMap;
 
-    let ctx = EvalContext::new(HashMap::new(), {
-        let mut m = HashMap::new();
-        m.insert("title".to_string(), crabase_lib::expr::eval::Value::Str("Hello".to_string()));
-        m
-    }, HashMap::new());
+    let ctx = EvalContext::new(
+        HashMap::new(),
+        {
+            let mut m = HashMap::new();
+            m.insert(
+                "title".to_string(),
+                crabase_lib::expr::eval::Value::Str("Hello".to_string()),
+            );
+            m
+        },
+        HashMap::new(),
+    );
 
     let ast = parse("title + \" World\"").expect("parse");
     let val = eval(&ast, &ctx).expect("eval");
     insta::assert_snapshot!(val.to_display());
+}
+
+proptest! {
+    #[test]
+    fn prop_addition_respects_precedence(
+        a in -500i32..500,
+        b in -500i32..500,
+        c in -500i32..500,
+    ) {
+        use crabase_lib::expr::{eval, parse, EvalContext};
+        use std::collections::HashMap;
+
+        let ctx = EvalContext::new(HashMap::new(), HashMap::new(), HashMap::new());
+        let ast = parse(&format!("{a} + {b} * {c}")).expect("parse");
+        let val = eval(&ast, &ctx).expect("eval");
+
+        prop_assert_eq!(val, crabase_lib::expr::eval::Value::Number((a + b * c) as f64));
+    }
+
+    #[test]
+    fn prop_string_reverse_is_involution(input in ".*") {
+        use crabase_lib::expr::{eval, parse, EvalContext};
+        use std::collections::HashMap;
+
+        let ctx = EvalContext::new(
+            HashMap::new(),
+            [(
+                "value".to_string(),
+                crabase_lib::expr::eval::Value::Str(input.clone()),
+            )]
+            .into_iter()
+            .collect(),
+            HashMap::new(),
+        );
+        let ast = parse("value.reverse().reverse()").expect("parse");
+        let val = eval(&ast, &ctx).expect("eval");
+
+        prop_assert_eq!(val, crabase_lib::expr::eval::Value::Str(input));
+    }
 }

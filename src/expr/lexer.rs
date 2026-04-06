@@ -70,26 +70,24 @@ impl<'a> Lexer<'a> {
                 None => {
                     return Err(CrabaseError::ExprParse(
                         "Unterminated string literal".to_string(),
-                    ))
+                    ));
                 }
-                Some('\\') => {
-                    match self.advance() {
-                        Some('n') => s.push('\n'),
-                        Some('t') => s.push('\t'),
-                        Some('r') => s.push('\r'),
-                        Some('\\') => s.push('\\'),
-                        Some(c) if c == quote => s.push(c),
-                        Some(c) => {
-                            s.push('\\');
-                            s.push(c);
-                        }
-                        None => {
-                            return Err(CrabaseError::ExprParse(
-                                "Unterminated escape sequence".to_string(),
-                            ))
-                        }
+                Some('\\') => match self.advance() {
+                    Some('n') => s.push('\n'),
+                    Some('t') => s.push('\t'),
+                    Some('r') => s.push('\r'),
+                    Some('\\') => s.push('\\'),
+                    Some(c) if c == quote => s.push(c),
+                    Some(c) => {
+                        s.push('\\');
+                        s.push(c);
                     }
-                }
+                    None => {
+                        return Err(CrabaseError::ExprParse(
+                            "Unterminated escape sequence".to_string(),
+                        ));
+                    }
+                },
                 Some(c) if c == quote => break,
                 Some(c) => s.push(c),
             }
@@ -233,4 +231,3 @@ impl<'a> Lexer<'a> {
         Ok(tokens)
     }
 }
-

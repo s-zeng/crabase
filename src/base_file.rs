@@ -1,6 +1,6 @@
+use crate::error::{CrabaseError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::error::{CrabaseError, Result};
 
 /// A filter node in the .base file filter tree
 #[derive(Debug, Clone)]
@@ -115,9 +115,9 @@ pub struct View {
 
 impl View {
     pub fn from_yaml(value: &serde_yaml::Value) -> Result<View> {
-        let map = value.as_mapping().ok_or_else(|| {
-            CrabaseError::BaseFile("View must be a YAML mapping".to_string())
-        })?;
+        let map = value
+            .as_mapping()
+            .ok_or_else(|| CrabaseError::BaseFile("View must be a YAML mapping".to_string()))?;
 
         let view_type = map
             .get("type")
@@ -138,10 +138,7 @@ impl View {
                 .collect::<Vec<_>>()
         });
 
-        let filters = map
-            .get("filters")
-            .map(FilterNode::from_yaml)
-            .transpose()?;
+        let filters = map.get("filters").map(FilterNode::from_yaml).transpose()?;
 
         let group_by = map
             .get("groupBy")
@@ -183,10 +180,7 @@ impl BaseFile {
             CrabaseError::BaseFile("Base file must be a YAML mapping at root".to_string())
         })?;
 
-        let filters = map
-            .get("filters")
-            .map(FilterNode::from_yaml)
-            .transpose()?;
+        let filters = map.get("filters").map(FilterNode::from_yaml).transpose()?;
 
         let formulas = map
             .get("formulas")

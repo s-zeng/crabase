@@ -103,6 +103,7 @@ src/
     eval.rs       - Evaluator with EvalContext and Value enum
 tests/
   integration.rs  - Integration tests using insta snapshot testing
+                    plus property-based parser/evaluator checks via proptest
   fixtures/
     vault/        - Small test vault with .md files in Church/Sermons/ and Notes/
     test.base     - Test .base file with folder filter and table view
