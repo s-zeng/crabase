@@ -209,6 +209,108 @@ fn test_base_views() {
     insta::assert_snapshot!(output.join("\n"));
 }
 
+fn eval_expr_with_formulas(
+    expr_str: &str,
+    formulas: Vec<(&str, &str)>,
+    note_props: Vec<(&str, crabase_lib::expr::eval::Value)>,
+) -> String {
+    use crabase_lib::expr::{EvalContext, eval, parse};
+    use std::collections::HashMap;
+    let formula_map: HashMap<String, String> = formulas
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let note_map: HashMap<String, crabase_lib::expr::eval::Value> = note_props
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+    let ctx = EvalContext::new(HashMap::new(), note_map, formula_map);
+    let ast = parse(expr_str).expect("parse");
+    eval(&ast, &ctx).expect("eval").to_display()
+}
+
+#[test]
+fn test_date_wikilink_parse() {
+    // date() must strip [[...]] Obsidian wikilink brackets
+    insta::assert_snapshot!(eval_expr("date(\"[[2025-01-15]]\").day"));
+}
+
+#[test]
+fn test_date_diff_days_property() {
+    // (date - date).days should convert ms to integer days
+    insta::assert_snapshot!(eval_expr(
+        "(date(\"2025-01-11\") - date(\"2025-01-01\")).days"
+    ));
+}
+
+#[test]
+fn test_formula_bracket_access() {
+    // formula["name"] must evaluate the named formula
+    let result = eval_expr_with_formulas(
+        "formula[\"double\"]",
+        vec![("double", "6 * 7")],
+        vec![],
+    );
+    insta::assert_snapshot!(result);
+}
+
+#[test]
+fn test_list_map_value_variable() {
+    // [x].map(if(value==null, null, value.toString() + " days"))
+    use crabase_lib::expr::eval::Value;
+    let result = eval_expr_with_formulas(
+        "[n].map(value.toString() + \" days\")",
+        vec![],
+        vec![("n", Value::Number(5.0))],
+    );
+    insta::assert_snapshot!(result);
+}
+
+#[test]
+fn test_list_map_null_passthrough() {
+    use crabase_lib::expr::eval::Value;
+    let result = eval_expr_with_formulas(
+        "[n].map(if(value==null, null, value.toString() + \" days\"))",
+        vec![],
+        vec![("n", Value::Null)],
+    );
+    insta::assert_snapshot!(result);
+}
+
+#[test]
+fn test_column_header_formula_prefix_stripped() {
+    use crabase_lib::base_file::BaseFile;
+    use crabase_lib::output::write_csv;
+    use crabase_lib::query::execute_query;
+    let vault = fixtures_vault();
+    let base_path = fixtures_base("test.base");
+    let content = std::fs::read_to_string(&base_path).expect("read base file");
+    let base_file = BaseFile::parse(&content).expect("parse base file");
+    let view = base_file.get_view(None).expect("get view");
+    let columns = view.order.clone().unwrap_or_default();
+    let rows = execute_query(&vault, &base_file, view).expect("execute query");
+    let mut out = Vec::new();
+    write_csv(&mut out, &columns, &rows, &base_file).expect("write csv");
+    let csv = String::from_utf8(out).expect("utf8");
+    // Header line must not contain "formula." or "file." prefixes
+    let header = csv.lines().next().unwrap_or("");
+    insta::assert_snapshot!((!header.contains("formula.") && !header.contains("file.")).to_string());
+}
+
+#[test]
+fn test_file_name_no_extension() {
+    let vault = fixtures_vault();
+    let files = crabase_lib::vault::scan_vault(&vault).expect("scan vault");
+    let sermon = files
+        .iter()
+        .find(|f| f.stem.contains("House of Blood"))
+        .expect("find sermon");
+    let props = sermon.file_props();
+    let name = props.get("name").cloned().unwrap_or(crabase_lib::expr::eval::Value::Null);
+    // file.name should be stem (no .md extension)
+    insta::assert_snapshot!(name.to_display());
+}
+
 proptest! {
     #[test]
     fn prop_addition_respects_precedence(

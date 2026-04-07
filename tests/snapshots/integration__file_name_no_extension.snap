@@ -1,0 +1,5 @@
+---
+source: tests/integration.rs
+expression: name.to_display()
+---
+2025-04-27 All Souls 1130am -- House of Blood

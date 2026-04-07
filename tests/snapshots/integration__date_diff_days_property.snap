@@ -1,0 +1,5 @@
+---
+source: tests/integration.rs
+expression: "eval_expr(\"(date(\\\"2025-01-11\\\") - date(\\\"2025-01-01\\\")).days\")"
+---
+10

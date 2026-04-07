@@ -1,0 +1,5 @@
+---
+source: tests/integration.rs
+expression: "(!header.contains(\"formula.\") && !header.contains(\"file.\")).to_string()"
+---
+true

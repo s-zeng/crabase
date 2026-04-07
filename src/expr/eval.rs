@@ -226,6 +226,20 @@ pub fn eval(expr: &Expr, ctx: &EvalContext) -> Result<Value> {
         }
 
         Expr::Index { object, index } => {
+            // Special case: formula["name"] looks up a named formula
+            if let Expr::Ident(obj_name) = object.as_ref() {
+                if obj_name == "formula" {
+                    let idx = eval(index, ctx)?;
+                    if let Value::Str(formula_name) = &idx {
+                        if let Some(formula_expr) = ctx.formulas.get(formula_name) {
+                            let formula_expr = formula_expr.clone();
+                            let parsed = crate::expr::parser::parse(&formula_expr)?;
+                            return eval(&parsed, ctx);
+                        }
+                    }
+                    return Ok(Value::Null);
+                }
+            }
             let obj = eval(object, ctx)?;
             let idx = eval(index, ctx)?;
             match (obj, idx) {
@@ -296,6 +310,8 @@ fn eval_object_access(object: &Expr, field: &str, ctx: &EvalContext) -> Result<V
     match (&obj_val, field) {
         (Value::Str(s), "length") => Ok(Value::Number(s.chars().count() as f64)),
         (Value::List(items), "length") => Ok(Value::Number(items.len() as f64)),
+        // Number field access: convert milliseconds to days
+        (Value::Number(n), "days") => Ok(Value::Number((n / 86_400_000.0).trunc())),
         // Date field access
         (Value::Date(dt), "year") => Ok(Value::Number(dt.year() as f64)),
         (Value::Date(dt), "month") => Ok(Value::Number(dt.month() as f64)),
@@ -326,6 +342,27 @@ fn eval_method_call(
     }
 
     let obj_val = eval(object, ctx)?;
+
+    // .map() must be evaluated lazily so each element binds "value" before the callback runs
+    if method == "map" {
+        if let Value::List(items) = &obj_val {
+            let callback = match args.first() {
+                Some(e) => e,
+                None => return Ok(Value::List(vec![])),
+            };
+            let mut results = Vec::new();
+            for item in items {
+                let mut note_props = ctx.note_props.clone();
+                note_props.insert("value".to_string(), item.clone());
+                let inner_ctx =
+                    EvalContext::new(ctx.file_props.clone(), note_props, ctx.formulas.clone());
+                results.push(eval(callback, &inner_ctx)?);
+            }
+            return Ok(Value::List(results));
+        }
+        return Ok(Value::Null);
+    }
+
     let eval_args = args
         .iter()
         .map(|a| eval(a, ctx))
@@ -830,6 +867,8 @@ fn eval_func_call(name: &str, args: &[Expr], ctx: &EvalContext) -> Result<Value>
                 None | Some(Value::Null) => Ok(Value::Null),
                 Some(Value::Date(dt)) => Ok(Value::Date(*dt)),
                 Some(Value::Str(s)) => {
+                    // Strip Obsidian wikilink brackets if present: [[2025-12-28]] -> 2025-12-28
+                    let s = s.trim_start_matches("[[").trim_end_matches("]]");
                     // Try datetime format first, then date-only
                     if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
                         Ok(Value::Date(dt))

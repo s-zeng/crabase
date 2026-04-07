@@ -45,15 +45,19 @@ fn write_csv_field(out: &mut dyn Write, field: &str) -> std::io::Result<()> {
     }
 }
 
-/// Get column header name (use displayName if configured)
+/// Get column header name (use displayName if configured, else apply Obsidian defaults)
 fn get_header(col: &str, base_file: &BaseFile) -> String {
     if let Some(prop) = base_file.properties.get(col) {
         if let Some(display) = &prop.display_name {
             return display.clone();
         }
     }
-    // Default: use the column name itself
-    col.to_string()
+    // Strip "formula." prefix (Obsidian shows just the formula name)
+    if let Some(name) = col.strip_prefix("formula.") {
+        return name.to_string();
+    }
+    // Replace "." with " " for other namespaced columns (e.g. "file.name" -> "file name")
+    col.replace('.', " ")
 }
 
 /// Write CSV output to writer

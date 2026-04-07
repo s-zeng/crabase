@@ -1,0 +1,5 @@
+---
+source: tests/integration.rs
+expression: "eval_expr(\"date(\\\"[[2025-01-15]]\\\").day\")"
+---
+15

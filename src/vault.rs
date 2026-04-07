@@ -40,7 +40,7 @@ impl VaultFile {
     /// Build the file_props HashMap for eval context
     pub fn file_props(&self) -> HashMap<String, Value> {
         [
-            ("name", Value::Str(self.name.clone())),
+            ("name", Value::Str(self.stem.clone())),
             ("path", Value::Str(self.rel_path.clone())),
             ("folder", Value::Str(self.folder.clone())),
             ("ext", Value::Str(self.ext.clone())),
