@@ -26,12 +26,38 @@ fn run() -> Result<()> {
     // Expect: crabase <subcommand> <key=value>...
     if raw_args.len() < 2 {
         eprintln!(
-            "Usage: crabase <subcommand> [args]\n  base:query file=<path> format=csv [vault=<vault_root>] [view=<view_name>]\n  bases [vault=<vault_root>]"
+            "Usage: crabase <subcommand> [args]\n  base:query file=<path> format=csv [vault=<vault_root>] [view=<view_name>]\n  base:views file=<path> [vault=<vault_root>]\n  bases [vault=<vault_root>]"
         );
         return Err(CrabaseError::MissingArg("subcommand".to_string()));
     }
 
     let subcommand = &raw_args[1];
+
+    if subcommand == "base:views" {
+        let kv_args = parse_kv_args(&raw_args[2..]);
+        let file_arg = kv_args
+            .get("file")
+            .ok_or_else(|| CrabaseError::MissingArg("file".to_string()))?;
+        let vault_root = kv_args
+            .get("vault")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let base_file_path = vault_root.join(file_arg);
+        let base_content = std::fs::read_to_string(&base_file_path).map_err(|e| {
+            CrabaseError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Cannot read base file '{}': {}", base_file_path.display(), e),
+            ))
+        })?;
+        let base_file = BaseFile::parse(&base_content)?;
+        for view in &base_file.views {
+            match &view.name {
+                Some(name) => println!("{name}"),
+                None => println!("(unnamed)"),
+            }
+        }
+        return Ok(());
+    }
 
     if subcommand == "bases" {
         let kv_args = parse_kv_args(&raw_args[2..]);
@@ -48,7 +74,7 @@ fn run() -> Result<()> {
 
     if subcommand != "base:query" {
         return Err(CrabaseError::Query(format!(
-            "Unknown subcommand: {subcommand}. Expected 'base:query' or 'bases'"
+            "Unknown subcommand: {subcommand}. Expected 'base:query', 'base:views', or 'bases'"
         )));
     }
 

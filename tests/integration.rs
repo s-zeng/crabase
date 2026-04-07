@@ -195,6 +195,20 @@ fn test_date_datetime_parse() {
     insta::assert_snapshot!(eval_expr("date(\"2025-04-27 15:30:00\").hour"));
 }
 
+#[test]
+fn test_base_views() {
+    use crabase_lib::base_file::BaseFile;
+    let base_path = fixtures_base("test.base");
+    let content = std::fs::read_to_string(&base_path).expect("read base file");
+    let base_file = BaseFile::parse(&content).expect("parse base file");
+    let output: Vec<String> = base_file
+        .views
+        .iter()
+        .map(|v| v.name.clone().unwrap_or_else(|| "(unnamed)".to_string()))
+        .collect();
+    insta::assert_snapshot!(output.join("\n"));
+}
+
 proptest! {
     #[test]
     fn prop_addition_respects_precedence(
