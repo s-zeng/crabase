@@ -1,5 +1,6 @@
 use crate::error::{CrabaseError, Result};
 use crate::expr::ast::{BinOp, Expr, UnaryOp};
+use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, Timelike};
 use std::collections::HashMap;
 
 /// Runtime value in the expression evaluator
@@ -10,6 +11,7 @@ pub enum Value {
     Number(f64),
     Str(String),
     List(Vec<Value>),
+    Date(NaiveDateTime),
 }
 
 impl Value {
@@ -21,6 +23,7 @@ impl Value {
             Value::Number(n) => *n != 0.0,
             Value::Str(s) => !s.is_empty(),
             Value::List(v) => !v.is_empty(),
+            Value::Date(_) => true,
         }
     }
 
@@ -31,6 +34,7 @@ impl Value {
             Value::Number(_) => "number",
             Value::Str(_) => "string",
             Value::List(_) => "list",
+            Value::Date(_) => "date",
         }
     }
 
@@ -46,6 +50,7 @@ impl Value {
                 .map(|v| v.to_display())
                 .collect::<Vec<_>>()
                 .join(", "),
+            Value::Date(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
         }
     }
 
@@ -64,8 +69,109 @@ fn format_number(n: f64) -> String {
     if n.fract() == 0.0 && n.abs() < 1e15 {
         format!("{}", n as i64)
     } else {
-        format!("{}", n)
+        format!("{n}")
     }
+}
+
+/// Parse a duration string like "1d", "2w", "3M", "4y", "5h", "6m", "7s"
+/// Returns (amount, canonical_unit) or None if unparseable.
+fn parse_duration_string(s: &str) -> Option<(i64, &'static str)> {
+    // Split leading digits from unit suffix
+    let split_pos = s.find(|c: char| !c.is_ascii_digit())?;
+    let (num_str, unit_str) = s.split_at(split_pos);
+    let amount: i64 = num_str.parse().ok()?;
+    let unit = match unit_str {
+        "d" | "day" | "days" => "days",
+        "w" | "week" | "weeks" => "weeks",
+        "M" | "month" | "months" => "months",
+        "y" | "year" | "years" => "years",
+        "h" | "hour" | "hours" => "hours",
+        "m" | "minute" | "minutes" => "minutes",
+        "s" | "second" | "seconds" => "seconds",
+        _ => return None,
+    };
+    Some((amount, unit))
+}
+
+/// Apply a signed duration to a NaiveDateTime.
+fn apply_duration(dt: NaiveDateTime, amount: i64, unit: &str) -> Result<NaiveDateTime> {
+    match unit {
+        "days" => dt
+            .checked_add_signed(chrono::Duration::days(amount))
+            .ok_or_else(|| CrabaseError::ExprEval("date overflow adding days".to_string())),
+        "weeks" => dt
+            .checked_add_signed(chrono::Duration::weeks(amount))
+            .ok_or_else(|| CrabaseError::ExprEval("date overflow adding weeks".to_string())),
+        "hours" => dt
+            .checked_add_signed(chrono::Duration::hours(amount))
+            .ok_or_else(|| CrabaseError::ExprEval("date overflow adding hours".to_string())),
+        "minutes" => dt
+            .checked_add_signed(chrono::Duration::minutes(amount))
+            .ok_or_else(|| CrabaseError::ExprEval("date overflow adding minutes".to_string())),
+        "seconds" => dt
+            .checked_add_signed(chrono::Duration::seconds(amount))
+            .ok_or_else(|| CrabaseError::ExprEval("date overflow adding seconds".to_string())),
+        "months" => {
+            if amount >= 0 {
+                dt.checked_add_months(chrono::Months::new(amount as u32))
+                    .ok_or_else(|| CrabaseError::ExprEval("date overflow adding months".to_string()))
+            } else {
+                dt.checked_sub_months(chrono::Months::new((-amount) as u32))
+                    .ok_or_else(|| CrabaseError::ExprEval("date overflow subtracting months".to_string()))
+            }
+        }
+        "years" => {
+            if amount >= 0 {
+                dt.checked_add_months(chrono::Months::new((amount as u32) * 12))
+                    .ok_or_else(|| CrabaseError::ExprEval("date overflow adding years".to_string()))
+            } else {
+                dt.checked_sub_months(chrono::Months::new(((-amount) as u32) * 12))
+                    .ok_or_else(|| CrabaseError::ExprEval("date overflow subtracting years".to_string()))
+            }
+        }
+        other => Err(CrabaseError::ExprEval(format!("Unknown duration unit: {other}"))),
+    }
+}
+
+/// Convert Moment.js format tokens to chrono strftime specifiers.
+fn moment_to_chrono(fmt: &str) -> String {
+    // Order matters: longer tokens first to avoid partial replacements
+    fmt.replace("YYYY", "%Y")
+        .replace("YY", "%y")
+        .replace("MM", "%m")
+        .replace("DD", "%d")
+        .replace("HH", "%H")
+        .replace("mm", "%M")
+        .replace("ss", "%S")
+}
+
+/// Produce a human-readable relative time string from a duration.
+fn format_relative(diff: chrono::Duration) -> String {
+    let secs = diff.num_seconds();
+    let abs = secs.unsigned_abs();
+    let suffix = if secs >= 0 { "ago" } else { "from now" };
+    let amount;
+    let unit;
+    if abs < 60 {
+        amount = abs;
+        unit = if abs == 1 { "second" } else { "seconds" };
+    } else if abs < 3600 {
+        amount = abs / 60;
+        unit = if amount == 1 { "minute" } else { "minutes" };
+    } else if abs < 86400 {
+        amount = abs / 3600;
+        unit = if amount == 1 { "hour" } else { "hours" };
+    } else if abs < 86400 * 30 {
+        amount = abs / 86400;
+        unit = if amount == 1 { "day" } else { "days" };
+    } else if abs < 86400 * 365 {
+        amount = abs / (86400 * 30);
+        unit = if amount == 1 { "month" } else { "months" };
+    } else {
+        amount = abs / (86400 * 365);
+        unit = if amount == 1 { "year" } else { "years" };
+    }
+    format!("{amount} {unit} {suffix}")
 }
 
 /// Evaluation context for a single file
@@ -146,6 +252,11 @@ pub fn eval(expr: &Expr, ctx: &EvalContext) -> Result<Value> {
             ))),
         },
 
+        Expr::Array(items) => {
+            let values = items.iter().map(|e| eval(e, ctx)).collect::<Result<Vec<_>>>()?;
+            Ok(Value::List(values))
+        }
+
         Expr::BinOp { op, left, right } => eval_binop(op, left, right, ctx),
 
         Expr::UnaryOp { op, operand } => {
@@ -154,7 +265,7 @@ pub fn eval(expr: &Expr, ctx: &EvalContext) -> Result<Value> {
                 UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
                 UnaryOp::Neg => match val {
                     Value::Number(n) => Ok(Value::Number(-n)),
-                    other => Err(CrabaseError::ExprEval(format!("Cannot negate {:?}", other))),
+                    other => Err(CrabaseError::ExprEval(format!("Cannot negate {other:?}"))),
                 },
             }
         }
@@ -185,6 +296,14 @@ fn eval_object_access(object: &Expr, field: &str, ctx: &EvalContext) -> Result<V
     match (&obj_val, field) {
         (Value::Str(s), "length") => Ok(Value::Number(s.chars().count() as f64)),
         (Value::List(items), "length") => Ok(Value::Number(items.len() as f64)),
+        // Date field access
+        (Value::Date(dt), "year") => Ok(Value::Number(dt.year() as f64)),
+        (Value::Date(dt), "month") => Ok(Value::Number(dt.month() as f64)),
+        (Value::Date(dt), "day") => Ok(Value::Number(dt.day() as f64)),
+        (Value::Date(dt), "hour") => Ok(Value::Number(dt.hour() as f64)),
+        (Value::Date(dt), "minute") => Ok(Value::Number(dt.minute() as f64)),
+        (Value::Date(dt), "second") => Ok(Value::Number(dt.second() as f64)),
+        (Value::Date(_), "millisecond") => Ok(Value::Number(0.0)),
         _ => Ok(Value::Null),
     }
 }
@@ -213,6 +332,34 @@ fn eval_method_call(
         .collect::<Result<Vec<_>>>()?;
 
     match (&obj_val, method) {
+        // Date methods
+        (Value::Date(dt), "format") => {
+            let fmt_str = eval_args
+                .first()
+                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None })
+                .unwrap_or("%Y-%m-%d %H:%M:%S");
+            let chrono_fmt = moment_to_chrono(fmt_str);
+            Ok(Value::Str(dt.format(&chrono_fmt).to_string()))
+        }
+        (Value::Date(dt), "date") => {
+            let d = dt.date();
+            Ok(Value::Date(d.and_hms_opt(0, 0, 0).unwrap_or(*dt)))
+        }
+        (Value::Date(dt), "time") => Ok(Value::Str(dt.format("%H:%M:%S").to_string())),
+        (Value::Date(dt), "relative") => {
+            let diff = Local::now().naive_local().signed_duration_since(*dt);
+            Ok(Value::Str(format_relative(diff)))
+        }
+        (Value::Date(_), "isEmpty") => Ok(Value::Bool(false)),
+        (Value::Date(_), "isTruthy") => Ok(Value::Bool(true)),
+        (Value::Date(dt), "toString") => Ok(Value::Str(dt.format("%Y-%m-%d %H:%M:%S").to_string())),
+        (Value::Date(_), "isType") => {
+            let type_name = eval_args
+                .first()
+                .and_then(|v| if let Value::Str(t) = v { Some(t.as_str()) } else { None })
+                .unwrap_or("");
+            Ok(Value::Bool(type_name == "date"))
+        }
         // String methods
         (Value::Str(s), "contains") => {
             let needle = eval_args
@@ -346,7 +493,7 @@ fn eval_method_call(
             if let Ok(n) = s.parse::<f64>() {
                 let precision =
                     eval_args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as usize;
-                Ok(Value::Str(format!("{:.prec$}", n, prec = precision)))
+                Ok(Value::Str(format!("{n:.precision$}")))
             } else {
                 Ok(Value::Str(s.clone()))
             }
@@ -365,7 +512,7 @@ fn eval_method_call(
         }
         (Value::Number(n), "toFixed") => {
             let precision = eval_args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as usize;
-            Ok(Value::Str(format!("{:.prec$}", n, prec = precision)))
+            Ok(Value::Str(format!("{n:.precision$}")))
         }
         (Value::Number(_), "isEmpty") => Ok(Value::Bool(false)),
         (Value::Number(n), "toString") => Ok(Value::Str(format_number(*n))),
@@ -441,7 +588,7 @@ fn eval_method_call(
         (Value::List(items), "reverse") => Ok(Value::List(items.iter().cloned().rev().collect())),
         (Value::List(items), "sort") => {
             let mut sorted = items.clone();
-            sorted.sort_by(|a, b| compare_values(a, b));
+            sorted.sort_by(compare_values);
             Ok(Value::List(sorted))
         }
         (Value::List(items), "unique") => Ok(Value::List(items.iter().cloned().fold(
@@ -507,7 +654,7 @@ fn eval_file_method(method: &str, args: &[Value], ctx: &EvalContext) -> Result<V
                         if let Value::Str(needle) = arg {
                             tag_list.iter().any(|tag| {
                                 if let Value::Str(t) = tag {
-                                    t == needle || t.starts_with(&format!("{}/", needle))
+                                    t == needle || t.starts_with(&format!("{needle}/"))
                                 } else {
                                     false
                                 }
@@ -555,9 +702,9 @@ fn eval_file_method(method: &str, args: &[Value], ctx: &EvalContext) -> Result<V
                 })
                 .unwrap_or("");
 
-            let in_folder = file_path.starts_with(&format!("{}/", folder_arg))
+            let in_folder = file_path.starts_with(&format!("{folder_arg}/"))
                 || file_folder == folder_arg
-                || file_folder.starts_with(&format!("{}/", folder_arg));
+                || file_folder.starts_with(&format!("{folder_arg}/"));
 
             Ok(Value::Bool(in_folder))
         }
@@ -570,9 +717,9 @@ fn eval_file_method(method: &str, args: &[Value], ctx: &EvalContext) -> Result<V
                             link_list.iter().any(|link| {
                                 if let Value::Str(l) = link {
                                     l == needle
-                                        || l.ends_with(&format!("/{}", needle))
-                                        || l == &format!("{}.md", needle)
-                                        || l.ends_with(&format!("/{}.md", needle))
+                                        || l.ends_with(&format!("/{needle}"))
+                                        || l == &format!("{needle}.md")
+                                        || l.ends_with(&format!("/{needle}.md"))
                                 } else {
                                     false
                                 }
@@ -619,9 +766,9 @@ fn eval_file_method(method: &str, args: &[Value], ctx: &EvalContext) -> Result<V
                 })
                 .unwrap_or("");
             let link = if let Some(d) = display {
-                format!("[[{}|{}]]", path, d)
+                format!("[[{path}|{d}]]")
             } else {
-                format!("[[{}]]", path)
+                format!("[[{path}]]")
             };
             Ok(Value::Str(link))
         }
@@ -678,11 +825,37 @@ fn eval_func_call(name: &str, args: &[Expr], ctx: &EvalContext) -> Result<Value>
                 .reduce(f64::max);
             Ok(max.map(Value::Number).unwrap_or(Value::Null))
         }
-        "today" => {
-            // Return a simple date string for today
-            Ok(Value::Str("today".to_string()))
+        "date" => {
+            match eval_args.first() {
+                None | Some(Value::Null) => Ok(Value::Null),
+                Some(Value::Date(dt)) => Ok(Value::Date(*dt)),
+                Some(Value::Str(s)) => {
+                    // Try datetime format first, then date-only
+                    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+                        Ok(Value::Date(dt))
+                    } else if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                        Ok(Value::Date(
+                            d.and_hms_opt(0, 0, 0)
+                                .ok_or_else(|| CrabaseError::ExprEval(format!("Invalid date: {s}")))?,
+                        ))
+                    } else {
+                        Err(CrabaseError::ExprEval(format!("Cannot parse date: {s:?}")))
+                    }
+                }
+                Some(other) => Err(CrabaseError::ExprEval(format!(
+                    "date() expects a string, got {other:?}"
+                ))),
+            }
         }
-        "now" => Ok(Value::Str("now".to_string())),
+        "today" => {
+            let today = Local::now()
+                .naive_local()
+                .date()
+                .and_hms_opt(0, 0, 0)
+                .ok_or_else(|| CrabaseError::ExprEval("Failed to construct today".to_string()))?;
+            Ok(Value::Date(today))
+        }
+        "now" => Ok(Value::Date(Local::now().naive_local())),
         "link" => {
             let path = eval_args
                 .first()
@@ -702,9 +875,9 @@ fn eval_func_call(name: &str, args: &[Expr], ctx: &EvalContext) -> Result<Value>
                 }
             });
             let link = if let Some(d) = display {
-                format!("[[{}|{}]]", path, d)
+                format!("[[{path}|{d}]]")
             } else {
-                format!("[[{}]]", path)
+                format!("[[{path}]]")
             };
             Ok(Value::Str(link))
         }
@@ -747,7 +920,7 @@ fn eval_binop(op: &BinOp, left: &Expr, right: &Expr, ctx: &EvalContext) -> Resul
 
     match op {
         BinOp::Add => eval_add(lval, rval),
-        BinOp::Sub => eval_arith(lval, rval, |a, b| a - b, "subtract"),
+        BinOp::Sub => eval_sub(lval, rval),
         BinOp::Mul => eval_arith(lval, rval, |a, b| a * b, "multiply"),
         BinOp::Div => eval_arith(lval, rval, |a, b| a / b, "divide"),
         BinOp::Mod => eval_arith(lval, rval, |a, b| a % b, "modulo"),
@@ -775,8 +948,16 @@ fn eval_binop(op: &BinOp, left: &Expr, right: &Expr, ctx: &EvalContext) -> Resul
 
 fn eval_add(lval: Value, rval: Value) -> Result<Value> {
     match (&lval, &rval) {
+        // Date + duration string (only when the string looks like a duration)
+        (Value::Date(dt), Value::Str(s)) => {
+            if let Some((amount, unit)) = parse_duration_string(s) {
+                apply_duration(*dt, amount, unit).map(Value::Date)
+            } else {
+                Ok(Value::Str(format!("{}{}", lval.to_display(), s)))
+            }
+        }
         (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
-        (Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{}{}", a, b))),
+        (Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{a}{b}"))),
         (Value::Str(a), other) => Ok(Value::Str(format!("{}{}", a, other.to_display()))),
         (other, Value::Str(b)) => Ok(Value::Str(format!("{}{}", other.to_display(), b))),
         _ => {
@@ -787,6 +968,20 @@ fn eval_add(lval: Value, rval: Value) -> Result<Value> {
                 Ok(Value::Null)
             }
         }
+    }
+}
+
+fn eval_sub(lval: Value, rval: Value) -> Result<Value> {
+    match (&lval, &rval) {
+        (Value::Date(a), Value::Date(b)) => Ok(Value::Number(
+            a.signed_duration_since(*b).num_milliseconds() as f64,
+        )),
+        (Value::Date(dt), Value::Str(s)) => {
+            let (amount, unit) = parse_duration_string(s)
+                .ok_or_else(|| CrabaseError::ExprEval(format!("Cannot parse duration: {s:?}")))?;
+            apply_duration(*dt, -amount, unit).map(Value::Date)
+        }
+        _ => eval_arith(lval, rval, |a, b| a - b, "subtract"),
     }
 }
 
@@ -803,8 +998,7 @@ fn eval_arith(
     match (lval.as_number(), rval.as_number()) {
         (Some(a), Some(b)) => Ok(Value::Number(op(a, b))),
         _ => Err(CrabaseError::ExprEval(format!(
-            "Cannot {} {:?} and {:?}",
-            op_name, lval, rval
+            "Cannot {op_name} {lval:?} and {rval:?}"
         ))),
     }
 }
@@ -815,12 +1009,13 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Number(a), Value::Number(b)) => a == b,
         (Value::Str(a), Value::Str(b)) => a == b,
+        (Value::Date(a), Value::Date(b)) => a == b,
         (Value::List(a), Value::List(b)) => {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
         }
         // Cross-type numeric comparison
-        (Value::Number(a), Value::Str(b)) => b.parse::<f64>().map_or(false, |n| *a == n),
-        (Value::Str(a), Value::Number(b)) => a.parse::<f64>().map_or(false, |n| n == *b),
+        (Value::Number(a), Value::Str(b)) => b.parse::<f64>() == Ok(*a),
+        (Value::Str(a), Value::Number(b)) => a.parse::<f64>() == Ok(*b),
         _ => false,
     }
 }
@@ -832,6 +1027,7 @@ pub fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
         }
         (Value::Str(a), Value::Str(b)) => a.cmp(b),
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        (Value::Date(a), Value::Date(b)) => a.cmp(b),
         // Try numeric cross-type
         _ => {
             if let (Some(a), Some(b)) = (a.as_number(), b.as_number()) {

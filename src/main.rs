@@ -33,8 +33,7 @@ fn run() -> Result<()> {
     let subcommand = &raw_args[1];
     if subcommand != "base:query" {
         return Err(CrabaseError::Query(format!(
-            "Unknown subcommand: {}. Expected 'base:query'",
-            subcommand
+            "Unknown subcommand: {subcommand}. Expected 'base:query'"
         )));
     }
 
@@ -47,8 +46,7 @@ fn run() -> Result<()> {
     let format = kv_args.get("format").map(String::as_str).unwrap_or("csv");
     if format != "csv" {
         return Err(CrabaseError::Query(format!(
-            "Unsupported format: {}. Only 'csv' is supported",
-            format
+            "Unsupported format: {format}. Only 'csv' is supported"
         )));
     }
 
@@ -72,7 +70,7 @@ fn run() -> Result<()> {
         ))
     })?;
 
-    let base_file = BaseFile::from_str(&base_content)?;
+    let base_file = BaseFile::parse(&base_content)?;
     let view = base_file.get_view(view_name)?;
 
     // Get the column order for output
@@ -89,7 +87,7 @@ fn run() -> Result<()> {
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e}");
         std::process::exit(1);
     }
 }

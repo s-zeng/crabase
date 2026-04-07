@@ -1,0 +1,5 @@
+---
+source: tests/integration.rs
+expression: "eval_expr(\"date(\\\"2025-01-01\\\") + \\\"1d\\\"\")"
+---
+2025-01-02 00:00:00

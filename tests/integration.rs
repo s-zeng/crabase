@@ -18,7 +18,7 @@ fn fixtures_base(name: &str) -> PathBuf {
 fn run_query(vault: &std::path::Path, base_path: &std::path::Path, view: Option<&str>) -> String {
     use crabase_lib::{base_file::BaseFile, output::write_csv, query::execute_query};
     let content = std::fs::read_to_string(base_path).expect("read base file");
-    let base_file = BaseFile::from_str(&content).expect("parse base file");
+    let base_file = BaseFile::parse(&content).expect("parse base file");
     let view_obj = base_file.get_view(view).expect("get view");
     let columns = view_obj.order.clone().unwrap_or_default();
     let rows = execute_query(vault, &base_file, view_obj).expect("execute query");
@@ -120,6 +120,79 @@ fn test_null_arithmetic_propagates_null() {
     let base_path = fixtures_base("null_arith.base");
     let output = run_query(&vault, &base_path, None);
     insta::assert_snapshot!(output);
+}
+
+fn eval_expr(expr_str: &str) -> String {
+    use crabase_lib::expr::{EvalContext, eval, parse};
+    use std::collections::HashMap;
+    let ctx = EvalContext::new(HashMap::new(), HashMap::new(), HashMap::new());
+    let ast = parse(expr_str).expect("parse");
+    eval(&ast, &ctx).expect("eval").to_display()
+}
+
+#[test]
+fn test_date_parse_year() {
+    insta::assert_snapshot!(eval_expr("date(\"2025-04-27\").year"));
+}
+
+#[test]
+fn test_date_parse_month() {
+    insta::assert_snapshot!(eval_expr("date(\"2025-04-27\").month"));
+}
+
+#[test]
+fn test_date_parse_day() {
+    insta::assert_snapshot!(eval_expr("date(\"2025-04-27\").day"));
+}
+
+#[test]
+fn test_date_add_days() {
+    insta::assert_snapshot!(eval_expr("date(\"2025-01-01\") + \"1d\""));
+}
+
+#[test]
+fn test_date_add_months() {
+    insta::assert_snapshot!(eval_expr("date(\"2025-01-31\") + \"1M\""));
+}
+
+#[test]
+fn test_date_sub_duration() {
+    insta::assert_snapshot!(eval_expr("date(\"2025-01-03\") - \"2d\""));
+}
+
+#[test]
+fn test_date_sub_date() {
+    insta::assert_snapshot!(eval_expr("date(\"2025-01-02\") - date(\"2025-01-01\")"));
+}
+
+#[test]
+fn test_date_comparison() {
+    insta::assert_snapshot!(eval_expr("date(\"2025-01-02\") > date(\"2025-01-01\")"));
+}
+
+#[test]
+fn test_date_format() {
+    insta::assert_snapshot!(eval_expr("date(\"2025-04-27\").format(\"YYYY/MM/DD\")"));
+}
+
+#[test]
+fn test_date_strip_time() {
+    insta::assert_snapshot!(eval_expr("date(\"2025-04-27 15:30:00\").date().time()"));
+}
+
+#[test]
+fn test_date_is_empty() {
+    insta::assert_snapshot!(eval_expr("date(\"2025-01-01\").isEmpty()"));
+}
+
+#[test]
+fn test_today_is_date_type() {
+    insta::assert_snapshot!(eval_expr("today().isType(\"date\")"));
+}
+
+#[test]
+fn test_date_datetime_parse() {
+    insta::assert_snapshot!(eval_expr("date(\"2025-04-27 15:30:00\").hour"));
 }
 
 proptest! {

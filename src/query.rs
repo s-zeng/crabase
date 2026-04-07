@@ -163,6 +163,7 @@ fn value_to_yaml(val: &crate::expr::eval::Value) -> serde_yaml::Value {
         Value::Bool(b) => serde_yaml::Value::Bool(*b),
         Value::Number(n) => serde_yaml::to_value(*n).unwrap_or(serde_yaml::Value::Null),
         Value::Str(s) => serde_yaml::Value::String(s.clone()),
+        Value::Date(dt) => serde_yaml::Value::String(dt.format("%Y-%m-%d %H:%M:%S").to_string()),
         Value::List(items) => {
             serde_yaml::Value::Sequence(items.iter().map(value_to_yaml).collect())
         }

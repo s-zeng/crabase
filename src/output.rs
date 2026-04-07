@@ -15,7 +15,7 @@ pub fn yaml_value_to_csv_str(val: &serde_yaml::Value) -> String {
                 if f.fract() == 0.0 {
                     format!("{}", f as i64)
                 } else {
-                    format!("{}", f)
+                    format!("{f}")
                 }
             } else {
                 n.to_string()
@@ -39,9 +39,9 @@ fn write_csv_field(out: &mut dyn Write, field: &str) -> std::io::Result<()> {
     if needs_quoting {
         // Escape quotes by doubling them
         let escaped = field.replace('"', "\"\"");
-        write!(out, "\"{}\"", escaped)
+        write!(out, "\"{escaped}\"")
     } else {
-        write!(out, "{}", field)
+        write!(out, "{field}")
     }
 }
 

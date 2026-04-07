@@ -43,8 +43,7 @@ impl FilterNode {
                 Ok(FilterNode::And(children))
             }
             _ => Err(CrabaseError::BaseFile(format!(
-                "Unexpected filter value type: {:?}",
-                value
+                "Unexpected filter value type: {value:?}"
             ))),
         }
     }
@@ -64,18 +63,13 @@ fn parse_filter_list(value: &serde_yaml::Value) -> Result<Vec<FilterNode>> {
 }
 
 /// Sort direction
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum SortDirection {
     #[serde(rename = "ASC")]
+    #[default]
     Asc,
     #[serde(rename = "DESC")]
     Desc,
-}
-
-impl Default for SortDirection {
-    fn default() -> Self {
-        SortDirection::Asc
-    }
 }
 
 /// Sort key specification
@@ -174,7 +168,7 @@ pub struct BaseFile {
 }
 
 impl BaseFile {
-    pub fn from_str(content: &str) -> Result<BaseFile> {
+    pub fn parse(content: &str) -> Result<BaseFile> {
         let yaml: serde_yaml::Value = serde_yaml::from_str(content)?;
         let map = yaml.as_mapping().ok_or_else(|| {
             CrabaseError::BaseFile("Base file must be a YAML mapping at root".to_string())

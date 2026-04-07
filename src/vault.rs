@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
+
 use crate::error::{CrabaseError, Result};
 use crate::expr::eval::Value;
 
@@ -22,6 +24,10 @@ pub struct VaultFile {
     pub folder: String,
     /// File size in bytes
     pub size: u64,
+    /// File creation time (if available)
+    pub ctime: Option<NaiveDateTime>,
+    /// File modification time
+    pub mtime: Option<NaiveDateTime>,
     /// Frontmatter properties
     pub frontmatter: HashMap<String, serde_yaml::Value>,
     /// Tags (from frontmatter + inline)
@@ -39,6 +45,8 @@ impl VaultFile {
             ("folder", Value::Str(self.folder.clone())),
             ("ext", Value::Str(self.ext.clone())),
             ("size", Value::Number(self.size as f64)),
+            ("ctime", self.ctime.map(Value::Date).unwrap_or(Value::Null)),
+            ("mtime", self.mtime.map(Value::Date).unwrap_or(Value::Null)),
             (
                 "tags",
                 Value::List(self.tags.iter().cloned().map(Value::Str).collect()),
@@ -73,7 +81,18 @@ fn yaml_to_value(v: &serde_yaml::Value) -> Value {
                 Value::Null
             }
         }
-        serde_yaml::Value::String(s) => Value::Str(s.clone()),
+        serde_yaml::Value::String(s) => {
+            // Try to parse date-like strings as Value::Date so date operations work
+            if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+                Value::Date(dt)
+            } else if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+                Value::Date(dt)
+            } else if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                d.and_hms_opt(0, 0, 0).map(Value::Date).unwrap_or(Value::Str(s.clone()))
+            } else {
+                Value::Str(s.clone())
+            }
+        }
         serde_yaml::Value::Sequence(seq) => Value::List(seq.iter().map(yaml_to_value).collect()),
         serde_yaml::Value::Mapping(_) => Value::Null,
         serde_yaml::Value::Tagged(tagged) => yaml_to_value(&tagged.value),
@@ -119,7 +138,15 @@ fn read_vault_file(vault_root: &Path, abs_path: &Path) -> Result<VaultFile> {
         .and_then(|p| p.strip_prefix(vault_root).ok())
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default();
-    let size = std::fs::metadata(&abs_path)?.len();
+    let meta = std::fs::metadata(&abs_path)?;
+    let size = meta.len();
+    let systime_to_naive = |t: std::time::SystemTime| -> Option<NaiveDateTime> {
+        let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+        let utc = chrono::DateTime::from_timestamp(secs, 0)?;
+        Some(Local.from_utc_datetime(&utc.naive_utc()).naive_local())
+    };
+    let mtime = meta.modified().ok().and_then(systime_to_naive);
+    let ctime = meta.created().ok().and_then(systime_to_naive);
     let content = std::fs::read_to_string(&abs_path)?;
     let (frontmatter, body) = parse_frontmatter(&content);
     let tags = extract_frontmatter_tags(&frontmatter)
@@ -141,6 +168,8 @@ fn read_vault_file(vault_root: &Path, abs_path: &Path) -> Result<VaultFile> {
         ext,
         folder,
         size,
+        ctime,
+        mtime,
         frontmatter,
         tags,
         links,
@@ -156,8 +185,8 @@ fn parse_frontmatter(content: &str) -> (HashMap<String, serde_yaml::Value>, Stri
     }
 
     // Find the closing ---
-    let after_open = if content.starts_with("---\r\n") {
-        &content[5..]
+    let after_open = if let Some(stripped) = content.strip_prefix("---\r\n") {
+        stripped
     } else {
         &content[4..]
     };

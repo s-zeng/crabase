@@ -1,0 +1,5 @@
+---
+source: tests/integration.rs
+expression: "eval_expr(\"date(\\\"2025-04-27\\\").format(\\\"YYYY/MM/DD\\\")\")"
+---
+2025/04/27

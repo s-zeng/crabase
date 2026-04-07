@@ -59,6 +59,7 @@
               cargo
               cargo-watch
               cargo-insta
+              clippy
               rust-analyzer
             ];
           };

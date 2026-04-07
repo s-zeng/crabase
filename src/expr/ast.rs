@@ -35,6 +35,8 @@ pub enum Expr {
         callee: Box<Expr>,
         args: Vec<Expr>,
     },
+    // Array literal: [e1, e2, ...]
+    Array(Vec<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

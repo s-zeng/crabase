@@ -145,6 +145,20 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(expr)
             }
+            Token::LBracket => {
+                self.advance();
+                if self.peek() == &Token::RBracket {
+                    self.advance();
+                    return Ok(Expr::Array(Vec::new()));
+                }
+                let mut items = vec![self.parse_expr()?];
+                while self.peek() == &Token::Comma {
+                    self.advance();
+                    items.push(self.parse_expr()?);
+                }
+                self.expect(&Token::RBracket)?;
+                Ok(Expr::Array(items))
+            }
             other => Err(CrabaseError::ExprParse(format!(
                 "Unexpected token in primary: {other:?}"
             ))),
