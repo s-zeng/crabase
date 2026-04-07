@@ -1,0 +1,13 @@
+filters:
+  and:
+    - "file.inFolder(\"Church/Sermons\")"
+    - "wc - 500 > 0"
+views:
+  - type: table
+    name: "Sermons"
+    order:
+      - title
+      - wc
+    groupBy:
+      property: date
+      direction: ASC

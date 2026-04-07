@@ -111,6 +111,17 @@ fn test_expression_string_concat() {
     insta::assert_snapshot!(val.to_display());
 }
 
+#[test]
+fn test_null_arithmetic_propagates_null() {
+    // Reproduces: "Cannot subtract Number(7.0) and Null"
+    // When a note is missing a numeric property and a formula does arithmetic on it,
+    // the result should be Null (not an error).
+    let vault = fixtures_vault();
+    let base_path = fixtures_base("null_arith.base");
+    let output = run_query(&vault, &base_path, None);
+    insta::assert_snapshot!(output);
+}
+
 proptest! {
     #[test]
     fn prop_addition_respects_precedence(

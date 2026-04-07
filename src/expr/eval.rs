@@ -796,6 +796,10 @@ fn eval_arith(
     op: impl Fn(f64, f64) -> f64,
     op_name: &str,
 ) -> Result<Value> {
+    // Null propagates through arithmetic (SQL/spreadsheet semantics)
+    if matches!(lval, Value::Null) || matches!(rval, Value::Null) {
+        return Ok(Value::Null);
+    }
     match (lval.as_number(), rval.as_number()) {
         (Some(a), Some(b)) => Ok(Value::Number(op(a, b))),
         _ => Err(CrabaseError::ExprEval(format!(
