@@ -1,5 +1,5 @@
 use crate::error::{CrabaseError, Result};
-use crate::expr::ast::{BinOp, Expr, UnaryOp};
+use crate::expr::ast::{BinOp, Expr, ExprKind, Ident, Literal, UnaryOp};
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, Timelike};
 use std::collections::HashMap;
 
@@ -114,10 +114,14 @@ fn apply_duration(dt: NaiveDateTime, amount: i64, unit: &str) -> Result<NaiveDat
         "months" => {
             if amount >= 0 {
                 dt.checked_add_months(chrono::Months::new(amount as u32))
-                    .ok_or_else(|| CrabaseError::ExprEval("date overflow adding months".to_string()))
+                    .ok_or_else(|| {
+                        CrabaseError::ExprEval("date overflow adding months".to_string())
+                    })
             } else {
                 dt.checked_sub_months(chrono::Months::new((-amount) as u32))
-                    .ok_or_else(|| CrabaseError::ExprEval("date overflow subtracting months".to_string()))
+                    .ok_or_else(|| {
+                        CrabaseError::ExprEval("date overflow subtracting months".to_string())
+                    })
             }
         }
         "years" => {
@@ -126,10 +130,14 @@ fn apply_duration(dt: NaiveDateTime, amount: i64, unit: &str) -> Result<NaiveDat
                     .ok_or_else(|| CrabaseError::ExprEval("date overflow adding years".to_string()))
             } else {
                 dt.checked_sub_months(chrono::Months::new(((-amount) as u32) * 12))
-                    .ok_or_else(|| CrabaseError::ExprEval("date overflow subtracting years".to_string()))
+                    .ok_or_else(|| {
+                        CrabaseError::ExprEval("date overflow subtracting years".to_string())
+                    })
             }
         }
-        other => Err(CrabaseError::ExprEval(format!("Unknown duration unit: {other}"))),
+        other => Err(CrabaseError::ExprEval(format!(
+            "Unknown duration unit: {other}"
+        ))),
     }
 }
 
@@ -174,7 +182,8 @@ fn format_relative(diff: chrono::Duration) -> String {
     format!("{amount} {unit} {suffix}")
 }
 
-/// Evaluation context for a single file
+/// Evaluation context for a single file.
+#[derive(Clone)]
 pub struct EvalContext {
     /// File properties (name, path, folder, ext, size, ctime, mtime, tags, links)
     pub file_props: HashMap<String, Value>,
@@ -182,6 +191,7 @@ pub struct EvalContext {
     pub note_props: HashMap<String, Value>,
     /// Formula definitions (name -> expression string)
     pub formulas: HashMap<String, String>,
+    formula_stack: Vec<String>,
 }
 
 impl EvalContext {
@@ -194,6 +204,7 @@ impl EvalContext {
             file_props,
             note_props,
             formulas,
+            formula_stack: Vec::new(),
         }
     }
 
@@ -201,41 +212,47 @@ impl EvalContext {
         // Try note props first, then file props
         self.note_props.get(name).cloned().unwrap_or(Value::Null)
     }
+
+    fn with_value_binding(&self, name: &str, value: Value) -> Self {
+        let mut next = self.clone();
+        next.note_props.insert(name.to_string(), value);
+        next
+    }
+
+    fn push_formula(&self, formula_name: &str) -> Result<Self> {
+        if self.formula_stack.iter().any(|entry| entry == formula_name) {
+            let mut cycle = self.formula_stack.clone();
+            cycle.push(formula_name.to_string());
+            return Err(CrabaseError::ExprEval(format!(
+                "Formula cycle detected: {}",
+                cycle.join(" -> ")
+            )));
+        }
+
+        let mut next = self.clone();
+        next.formula_stack.push(formula_name.to_string());
+        Ok(next)
+    }
 }
 
 pub fn eval(expr: &Expr, ctx: &EvalContext) -> Result<Value> {
-    match expr {
-        Expr::Number(n) => Ok(Value::Number(*n)),
-        Expr::Str(s) => Ok(Value::Str(s.clone())),
-        Expr::Bool(b) => Ok(Value::Bool(*b)),
-        Expr::Null => Ok(Value::Null),
+    match &expr.kind {
+        ExprKind::Literal(Literal::Number(n)) => Ok(Value::Number(*n)),
+        ExprKind::Literal(Literal::Str(s)) => Ok(Value::Str(s.clone())),
+        ExprKind::Literal(Literal::Bool(b)) => Ok(Value::Bool(*b)),
+        ExprKind::Literal(Literal::Null) => Ok(Value::Null),
 
-        Expr::Ident(name) => {
-            // Check for formula
-            if let Some(formula_expr) = ctx.formulas.get(name) {
-                let formula_expr = formula_expr.clone();
-                let parsed = crate::expr::parser::parse(&formula_expr)?;
-                return eval(&parsed, ctx);
-            }
-            Ok(ctx.get_variable(name))
-        }
+        ExprKind::Variable(name) => eval_variable(name, ctx),
 
-        Expr::Member { object, field } => {
-            let obj_val = eval_object_access(object, field, ctx)?;
-            Ok(obj_val)
-        }
+        ExprKind::Member { object, field } => eval_object_access(object, field.as_str(), ctx),
 
-        Expr::Index { object, index } => {
+        ExprKind::Index { object, index } => {
             // Special case: formula["name"] looks up a named formula
-            if let Expr::Ident(obj_name) = object.as_ref() {
-                if obj_name == "formula" {
+            if let ExprKind::Variable(obj_name) = &object.kind {
+                if obj_name.as_str() == "formula" {
                     let idx = eval(index, ctx)?;
                     if let Value::Str(formula_name) = &idx {
-                        if let Some(formula_expr) = ctx.formulas.get(formula_name) {
-                            let formula_expr = formula_expr.clone();
-                            let parsed = crate::expr::parser::parse(&formula_expr)?;
-                            return eval(&parsed, ctx);
-                        }
+                        return eval_formula(formula_name, ctx);
                     }
                     return Ok(Value::Null);
                 }
@@ -258,22 +275,27 @@ pub fn eval(expr: &Expr, ctx: &EvalContext) -> Result<Value> {
             }
         }
 
-        Expr::Call { callee, args } => match callee.as_ref() {
-            Expr::Ident(name) => eval_func_call(name, args, ctx),
-            Expr::Member { object, field } => eval_method_call(object, field, args, ctx),
+        ExprKind::Call { callee, args } => match &callee.kind {
+            ExprKind::Variable(name) => eval_func_call(name.as_str(), args, ctx),
+            ExprKind::Member { object, field } => {
+                eval_method_call(object, field.as_str(), args, ctx)
+            }
             other => Err(CrabaseError::ExprEval(format!(
                 "Expression is not callable: {other:?}"
             ))),
         },
 
-        Expr::Array(items) => {
-            let values = items.iter().map(|e| eval(e, ctx)).collect::<Result<Vec<_>>>()?;
+        ExprKind::Array(items) => {
+            let values = items
+                .iter()
+                .map(|e| eval(e, ctx))
+                .collect::<Result<Vec<_>>>()?;
             Ok(Value::List(values))
         }
 
-        Expr::BinOp { op, left, right } => eval_binop(op, left, right, ctx),
+        ExprKind::Binary { op, left, right } => eval_binop(op, left, right, ctx),
 
-        Expr::UnaryOp { op, operand } => {
+        ExprKind::Unary { op, operand } => {
             let val = eval(operand, ctx)?;
             match op {
                 UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
@@ -286,20 +308,34 @@ pub fn eval(expr: &Expr, ctx: &EvalContext) -> Result<Value> {
     }
 }
 
+fn eval_variable(name: &Ident, ctx: &EvalContext) -> Result<Value> {
+    if ctx.formulas.contains_key(name.as_str()) {
+        return eval_formula(name.as_str(), ctx);
+    }
+    Ok(ctx.get_variable(name.as_str()))
+}
+
+fn eval_formula(formula_name: &str, ctx: &EvalContext) -> Result<Value> {
+    let Some(formula_expr) = ctx.formulas.get(formula_name) else {
+        return Ok(Value::Null);
+    };
+    let parsed = crate::expr::parser::parse(formula_expr)?;
+    let nested_ctx = ctx.push_formula(formula_name)?;
+    eval(&parsed, &nested_ctx)
+}
+
 fn eval_object_access(object: &Expr, field: &str, ctx: &EvalContext) -> Result<Value> {
     // Special case: top-level "file" object
-    if let Expr::Ident(obj_name) = object {
-        if obj_name == "file" {
+    if let ExprKind::Variable(obj_name) = &object.kind {
+        if obj_name.as_str() == "file" {
             return Ok(ctx.file_props.get(field).cloned().unwrap_or(Value::Null));
         }
-        if obj_name == "note" {
+        if obj_name.as_str() == "note" {
             return Ok(ctx.note_props.get(field).cloned().unwrap_or(Value::Null));
         }
-        if obj_name == "formula" {
-            if let Some(formula_expr) = ctx.formulas.get(field) {
-                let formula_expr = formula_expr.clone();
-                let parsed = crate::expr::parser::parse(&formula_expr)?;
-                return eval(&parsed, ctx);
+        if obj_name.as_str() == "formula" {
+            if ctx.formulas.contains_key(field) {
+                return eval_formula(field, ctx);
             }
             return Ok(Value::Null);
         }
@@ -331,8 +367,8 @@ fn eval_method_call(
     ctx: &EvalContext,
 ) -> Result<Value> {
     // Special case for "file" object methods
-    if let Expr::Ident(obj_name) = object {
-        if obj_name == "file" {
+    if let ExprKind::Variable(obj_name) = &object.kind {
+        if obj_name.as_str() == "file" {
             let eval_args = args
                 .iter()
                 .map(|a| eval(a, ctx))
@@ -352,10 +388,7 @@ fn eval_method_call(
             };
             let mut results = Vec::new();
             for item in items {
-                let mut note_props = ctx.note_props.clone();
-                note_props.insert("value".to_string(), item.clone());
-                let inner_ctx =
-                    EvalContext::new(ctx.file_props.clone(), note_props, ctx.formulas.clone());
+                let inner_ctx = ctx.with_value_binding("value", item.clone());
                 results.push(eval(callback, &inner_ctx)?);
             }
             return Ok(Value::List(results));
@@ -373,7 +406,13 @@ fn eval_method_call(
         (Value::Date(dt), "format") => {
             let fmt_str = eval_args
                 .first()
-                .and_then(|v| if let Value::Str(s) = v { Some(s.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("%Y-%m-%d %H:%M:%S");
             let chrono_fmt = moment_to_chrono(fmt_str);
             Ok(Value::Str(dt.format(&chrono_fmt).to_string()))
@@ -393,7 +432,13 @@ fn eval_method_call(
         (Value::Date(_), "isType") => {
             let type_name = eval_args
                 .first()
-                .and_then(|v| if let Value::Str(t) = v { Some(t.as_str()) } else { None })
+                .and_then(|v| {
+                    if let Value::Str(t) = v {
+                        Some(t.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("");
             Ok(Value::Bool(type_name == "date"))
         }
@@ -873,10 +918,9 @@ fn eval_func_call(name: &str, args: &[Expr], ctx: &EvalContext) -> Result<Value>
                     if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
                         Ok(Value::Date(dt))
                     } else if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-                        Ok(Value::Date(
-                            d.and_hms_opt(0, 0, 0)
-                                .ok_or_else(|| CrabaseError::ExprEval(format!("Invalid date: {s}")))?,
-                        ))
+                        Ok(Value::Date(d.and_hms_opt(0, 0, 0).ok_or_else(|| {
+                            CrabaseError::ExprEval(format!("Invalid date: {s}"))
+                        })?))
                     } else {
                         Err(CrabaseError::ExprEval(format!("Cannot parse date: {s:?}")))
                     }

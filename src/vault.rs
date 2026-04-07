@@ -88,7 +88,9 @@ fn yaml_to_value(v: &serde_yaml::Value) -> Value {
             } else if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
                 Value::Date(dt)
             } else if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-                d.and_hms_opt(0, 0, 0).map(Value::Date).unwrap_or(Value::Str(s.clone()))
+                d.and_hms_opt(0, 0, 0)
+                    .map(Value::Date)
+                    .unwrap_or(Value::Str(s.clone()))
             } else {
                 Value::Str(s.clone())
             }

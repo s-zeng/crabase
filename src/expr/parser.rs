@@ -1,6 +1,6 @@
 use crate::error::{CrabaseError, Result};
-use crate::expr::ast::{BinOp, Expr, UnaryOp};
-use crate::expr::lexer::{Lexer, Token};
+use crate::expr::ast::{BinOp, Expr, ExprKind, Ident, Literal, Span, UnaryOp};
+use crate::expr::lexer::{Lexer, Token, TokenKind};
 
 pub struct Parser {
     tokens: Vec<Token>,
@@ -9,28 +9,34 @@ pub struct Parser {
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0 }
+        Self { tokens, pos: 0 }
     }
 
     fn peek(&self) -> &Token {
-        self.tokens.get(self.pos).unwrap_or(&Token::Eof)
+        let last_index = self.tokens.len().saturating_sub(1);
+        &self.tokens[self.pos.min(last_index)]
     }
 
-    fn advance(&mut self) -> &Token {
-        let token = self.tokens.get(self.pos).unwrap_or(&Token::Eof);
+    fn advance(&mut self) -> Token {
+        let token = self.peek().clone();
         if self.pos < self.tokens.len() {
             self.pos += 1;
         }
         token
     }
 
-    fn expect(&mut self, expected: &Token) -> Result<()> {
-        let actual = self.advance();
-        if actual == expected {
-            Ok(())
+    fn matches(&self, kind: &TokenKind) -> bool {
+        &self.peek().kind == kind
+    }
+
+    fn expect(&mut self, expected: TokenKind) -> Result<Token> {
+        let token = self.advance();
+        if token.kind == expected {
+            Ok(token)
         } else {
             Err(CrabaseError::ExprParse(format!(
-                "Expected {expected:?}, got {actual:?}"
+                "Expected {:?} at {}, got {:?}",
+                expected, token.span.start, token.kind
             )))
         }
     }
@@ -42,38 +48,52 @@ impl Parser {
     fn parse_precedence(&mut self, min_binding_power: u8) -> Result<Expr> {
         let mut left = self.parse_prefix()?;
 
-        while let Some((op, left_bp, right_bp)) = infix_binding_power(self.peek()) {
+        while let Some((op, left_bp, right_bp)) = infix_binding_power(&self.peek().kind) {
             if left_bp < min_binding_power {
                 break;
             }
 
-            self.advance();
+            let _operator = self.advance();
             let right = self.parse_precedence(right_bp)?;
-            left = Expr::BinOp {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
+            let span = left.span.merge(right.span);
+            left = Expr::new(
+                ExprKind::Binary {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                span,
+            );
         }
 
         Ok(left)
     }
 
     fn parse_prefix(&mut self) -> Result<Expr> {
-        let expr = match self.peek() {
-            Token::Bang => {
-                self.advance();
-                Expr::UnaryOp {
-                    op: UnaryOp::Not,
-                    operand: Box::new(self.parse_precedence(11)?),
-                }
+        let expr = match self.peek().kind.clone() {
+            TokenKind::Bang => {
+                let operator = self.advance();
+                let operand = self.parse_precedence(11)?;
+                let span = operator.span.merge(operand.span);
+                Expr::new(
+                    ExprKind::Unary {
+                        op: UnaryOp::Not,
+                        operand: Box::new(operand),
+                    },
+                    span,
+                )
             }
-            Token::Minus => {
-                self.advance();
-                Expr::UnaryOp {
-                    op: UnaryOp::Neg,
-                    operand: Box::new(self.parse_precedence(11)?),
-                }
+            TokenKind::Minus => {
+                let operator = self.advance();
+                let operand = self.parse_precedence(11)?;
+                let span = operator.span.merge(operand.span);
+                Expr::new(
+                    ExprKind::Unary {
+                        op: UnaryOp::Neg,
+                        operand: Box::new(operand),
+                    },
+                    span,
+                )
             }
             _ => self.parse_primary()?,
         };
@@ -85,32 +105,48 @@ impl Parser {
         let mut current = expr;
 
         loop {
-            current = match self.peek() {
-                Token::LParen => {
-                    self.advance();
+            current = match self.peek().kind.clone() {
+                TokenKind::LParen => {
+                    let open = self.advance();
                     let args = self.parse_args()?;
-                    self.expect(&Token::RParen)?;
-                    Expr::Call {
-                        callee: Box::new(current),
-                        args,
-                    }
+                    let close = self.expect(TokenKind::RParen)?;
+                    let span = current.span.merge(open.span).merge(close.span);
+                    Expr::new(
+                        ExprKind::Call {
+                            callee: Box::new(current),
+                            args,
+                        },
+                        span,
+                    )
                 }
-                Token::Dot => {
-                    self.advance();
+                TokenKind::Dot => {
+                    let _dot = self.advance();
                     let field = self.parse_identifier("Expected identifier after '.'")?;
-                    Expr::Member {
-                        object: Box::new(current),
-                        field,
-                    }
+                    let span = current.span.merge(field.1);
+                    Expr::new(
+                        ExprKind::Member {
+                            object: Box::new(current),
+                            field: field.0,
+                        },
+                        span,
+                    )
                 }
-                Token::LBracket => {
-                    self.advance();
+                TokenKind::LBracket => {
+                    let open = self.advance();
                     let index = self.parse_expr()?;
-                    self.expect(&Token::RBracket)?;
-                    Expr::Index {
-                        object: Box::new(current),
-                        index: Box::new(index),
-                    }
+                    let close = self.expect(TokenKind::RBracket)?;
+                    let span = current
+                        .span
+                        .merge(open.span)
+                        .merge(index.span)
+                        .merge(close.span);
+                    Expr::new(
+                        ExprKind::Index {
+                            object: Box::new(current),
+                            index: Box::new(index),
+                        },
+                        span,
+                    )
                 }
                 _ => return Ok(current),
             };
@@ -118,104 +154,128 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expr> {
-        match self.peek().clone() {
-            Token::Number(number) => {
-                self.advance();
-                Ok(Expr::Number(number))
+        match self.peek().kind.clone() {
+            TokenKind::Number(number) => {
+                let token = self.advance();
+                Ok(Expr::new(
+                    ExprKind::Literal(Literal::Number(number)),
+                    token.span,
+                ))
             }
-            Token::Str(text) => {
-                self.advance();
-                Ok(Expr::Str(text))
+            TokenKind::Str(text) => {
+                let token = self.advance();
+                Ok(Expr::new(ExprKind::Literal(Literal::Str(text)), token.span))
             }
-            Token::Bool(value) => {
-                self.advance();
-                Ok(Expr::Bool(value))
+            TokenKind::Bool(value) => {
+                let token = self.advance();
+                Ok(Expr::new(
+                    ExprKind::Literal(Literal::Bool(value)),
+                    token.span,
+                ))
             }
-            Token::Null => {
-                self.advance();
-                Ok(Expr::Null)
+            TokenKind::Null => {
+                let token = self.advance();
+                Ok(Expr::new(ExprKind::Literal(Literal::Null), token.span))
             }
-            Token::Ident(name) => {
-                self.advance();
-                Ok(Expr::Ident(name))
+            TokenKind::Ident(name) => {
+                let token = self.advance();
+                Ok(Expr::new(ExprKind::Variable(name), token.span))
             }
-            Token::LParen => {
-                self.advance();
+            TokenKind::LParen => {
+                let open = self.advance();
                 let expr = self.parse_expr()?;
-                self.expect(&Token::RParen)?;
-                Ok(expr)
+                let close = self.expect(TokenKind::RParen)?;
+                Ok(Expr::new(
+                    expr.kind,
+                    open.span.merge(expr.span).merge(close.span),
+                ))
             }
-            Token::LBracket => {
-                self.advance();
-                if self.peek() == &Token::RBracket {
-                    self.advance();
-                    return Ok(Expr::Array(Vec::new()));
+            TokenKind::LBracket => {
+                let open = self.advance();
+                if self.matches(&TokenKind::RBracket) {
+                    let close = self.advance();
+                    return Ok(Expr::new(
+                        ExprKind::Array(Vec::new()),
+                        open.span.merge(close.span),
+                    ));
                 }
+
                 let mut items = vec![self.parse_expr()?];
-                while self.peek() == &Token::Comma {
-                    self.advance();
+                while self.matches(&TokenKind::Comma) {
+                    let _ = self.advance();
                     items.push(self.parse_expr()?);
                 }
-                self.expect(&Token::RBracket)?;
-                Ok(Expr::Array(items))
+                let close = self.expect(TokenKind::RBracket)?;
+                let items_span = items
+                    .iter()
+                    .fold(open.span, |span, item| span.merge(item.span))
+                    .merge(close.span);
+                Ok(Expr::new(ExprKind::Array(items), items_span))
             }
             other => Err(CrabaseError::ExprParse(format!(
-                "Unexpected token in primary: {other:?}"
+                "Unexpected token {:?} at {}",
+                other,
+                self.peek().span.start
             ))),
         }
     }
 
-    fn parse_identifier(&mut self, message: &str) -> Result<String> {
-        match self.advance() {
-            Token::Ident(name) => Ok(name.clone()),
-            other => Err(CrabaseError::ExprParse(format!("{message}, got {other:?}"))),
+    fn parse_identifier(&mut self, message: &str) -> Result<(Ident, Span)> {
+        let token = self.advance();
+        match token.kind {
+            TokenKind::Ident(name) => Ok((name, token.span)),
+            other => Err(CrabaseError::ExprParse(format!(
+                "{message} at {}, got {:?}",
+                token.span.start, other
+            ))),
         }
     }
 
     fn parse_args(&mut self) -> Result<Vec<Expr>> {
-        if self.peek() == &Token::RParen {
+        if self.matches(&TokenKind::RParen) {
             return Ok(Vec::new());
         }
 
         let mut args = vec![self.parse_expr()?];
-        while self.peek() == &Token::Comma {
-            self.advance();
+        while self.matches(&TokenKind::Comma) {
+            let _ = self.advance();
             args.push(self.parse_expr()?);
         }
         Ok(args)
     }
 }
 
-fn infix_binding_power(token: &Token) -> Option<(BinOp, u8, u8)> {
+fn infix_binding_power(token: &TokenKind) -> Option<(BinOp, u8, u8)> {
     match token {
-        Token::PipePipe => Some((BinOp::Or, 1, 2)),
-        Token::AmpAmp => Some((BinOp::And, 3, 4)),
-        Token::EqEq => Some((BinOp::Eq, 5, 6)),
-        Token::BangEq => Some((BinOp::Ne, 5, 6)),
-        Token::Gt => Some((BinOp::Gt, 5, 6)),
-        Token::Lt => Some((BinOp::Lt, 5, 6)),
-        Token::GtEq => Some((BinOp::Ge, 5, 6)),
-        Token::LtEq => Some((BinOp::Le, 5, 6)),
-        Token::Plus => Some((BinOp::Add, 7, 8)),
-        Token::Minus => Some((BinOp::Sub, 7, 8)),
-        Token::Star => Some((BinOp::Mul, 9, 10)),
-        Token::Slash => Some((BinOp::Div, 9, 10)),
-        Token::Percent => Some((BinOp::Mod, 9, 10)),
+        TokenKind::PipePipe => Some((BinOp::Or, 1, 2)),
+        TokenKind::AmpAmp => Some((BinOp::And, 3, 4)),
+        TokenKind::EqEq => Some((BinOp::Eq, 5, 6)),
+        TokenKind::BangEq => Some((BinOp::Ne, 5, 6)),
+        TokenKind::Gt => Some((BinOp::Gt, 5, 6)),
+        TokenKind::Lt => Some((BinOp::Lt, 5, 6)),
+        TokenKind::GtEq => Some((BinOp::Ge, 5, 6)),
+        TokenKind::LtEq => Some((BinOp::Le, 5, 6)),
+        TokenKind::Plus => Some((BinOp::Add, 7, 8)),
+        TokenKind::Minus => Some((BinOp::Sub, 7, 8)),
+        TokenKind::Star => Some((BinOp::Mul, 9, 10)),
+        TokenKind::Slash => Some((BinOp::Div, 9, 10)),
+        TokenKind::Percent => Some((BinOp::Mod, 9, 10)),
         _ => None,
     }
 }
 
-/// Parse an expression string into an AST
 pub fn parse(input: &str) -> Result<Expr> {
     let mut lexer = Lexer::new(input);
     let tokens = lexer.tokenize()?;
     let mut parser = Parser::new(tokens);
     let expr = parser.parse_expr()?;
 
-    match parser.peek() {
-        Token::Eof => Ok(expr),
+    match &parser.peek().kind {
+        TokenKind::Eof => Ok(expr),
         other => Err(CrabaseError::ExprParse(format!(
-            "Unexpected trailing token: {other:?}"
+            "Unexpected trailing token {:?} at {}",
+            other,
+            parser.peek().span.start
         ))),
     }
 }

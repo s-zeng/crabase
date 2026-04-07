@@ -1,39 +1,39 @@
 use crate::error::{CrabaseError, Result};
+use crate::expr::ast::{Ident, Span};
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Token {
-    // Literals
+pub struct Token {
+    pub kind: TokenKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TokenKind {
     Number(f64),
     Str(String),
     Bool(bool),
     Null,
-    // Identifiers
-    Ident(String),
-    // Punctuation
+    Ident(Ident),
     Dot,
     LParen,
     RParen,
     LBracket,
     RBracket,
     Comma,
-    // Arithmetic operators
     Plus,
     Minus,
     Star,
     Slash,
     Percent,
-    // Comparison operators
     EqEq,
     BangEq,
     Gt,
     Lt,
     GtEq,
     LtEq,
-    // Boolean operators
     AmpAmp,
     PipePipe,
     Bang,
-    // End of input
     Eof,
 }
 
@@ -44,7 +44,7 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
-        Lexer { input, pos: 0 }
+        Self { input, pos: 0 }
     }
 
     fn peek_char(&self) -> Option<char> {
@@ -59,18 +59,28 @@ impl<'a> Lexer<'a> {
 
     fn skip_whitespace(&mut self) {
         while self.peek_char().is_some_and(|c| c.is_whitespace()) {
-            self.advance();
+            let _ = self.advance();
         }
     }
 
-    fn read_string(&mut self, quote: char) -> Result<Token> {
+    fn token(&self, start: usize, kind: TokenKind) -> Token {
+        Token {
+            kind,
+            span: Span {
+                start,
+                end: self.pos,
+            },
+        }
+    }
+
+    fn read_string(&mut self, quote: char, start: usize) -> Result<Token> {
         let mut s = String::new();
         loop {
             match self.advance() {
                 None => {
-                    return Err(CrabaseError::ExprParse(
-                        "Unterminated string literal".to_string(),
-                    ));
+                    return Err(CrabaseError::ExprParse(format!(
+                        "Unterminated string literal at {start}"
+                    )));
                 }
                 Some('\\') => match self.advance() {
                     Some('n') => s.push('\n'),
@@ -83,147 +93,153 @@ impl<'a> Lexer<'a> {
                         s.push(c);
                     }
                     None => {
-                        return Err(CrabaseError::ExprParse(
-                            "Unterminated escape sequence".to_string(),
-                        ));
+                        return Err(CrabaseError::ExprParse(format!(
+                            "Unterminated escape sequence at {}",
+                            self.pos
+                        )));
                     }
                 },
-                Some(c) if c == quote => break,
+                Some(c) if c == quote => return Ok(self.token(start, TokenKind::Str(s))),
                 Some(c) => s.push(c),
             }
         }
-        Ok(Token::Str(s))
     }
 
-    fn read_number(&mut self, first: char) -> Token {
-        let mut s = String::new();
-        s.push(first);
+    fn read_number(&mut self, first: char, start: usize) -> Result<Token> {
+        let mut raw = String::from(first);
+        let mut seen_decimal = first == '.';
+
         while let Some(c) = self.peek_char() {
-            if c.is_ascii_digit() || c == '.' {
-                s.push(c);
-                self.advance();
-            } else {
-                break;
+            if c.is_ascii_digit() {
+                raw.push(c);
+                let _ = self.advance();
+                continue;
             }
+            if c == '.' && !seen_decimal {
+                seen_decimal = true;
+                raw.push(c);
+                let _ = self.advance();
+                continue;
+            }
+            break;
         }
-        let n: f64 = s.parse().unwrap_or(0.0);
-        Token::Number(n)
+
+        let number = raw.parse::<f64>().map_err(|error| {
+            CrabaseError::ExprParse(format!(
+                "Invalid numeric literal '{raw}' at {start}: {error}"
+            ))
+        })?;
+        Ok(self.token(start, TokenKind::Number(number)))
     }
 
-    fn read_ident(&mut self, first: char) -> Token {
-        let mut s = String::new();
-        s.push(first);
+    fn read_ident(&mut self, first: char, start: usize) -> Token {
+        let mut s = String::from(first);
         while let Some(c) = self.peek_char() {
             if c.is_alphanumeric() || c == '_' {
                 s.push(c);
-                self.advance();
+                let _ = self.advance();
             } else {
                 break;
             }
         }
-        match s.as_str() {
-            "true" => Token::Bool(true),
-            "false" => Token::Bool(false),
-            "null" => Token::Null,
-            _ => Token::Ident(s),
-        }
+
+        let kind = match s.as_str() {
+            "true" => TokenKind::Bool(true),
+            "false" => TokenKind::Bool(false),
+            "null" => TokenKind::Null,
+            _ => TokenKind::Ident(Ident::new(s)),
+        };
+        self.token(start, kind)
     }
 
     pub fn next_token(&mut self) -> Result<Token> {
         self.skip_whitespace();
+        let start = self.pos;
+
         match self.peek_char() {
-            None => Ok(Token::Eof),
+            None => Ok(self.token(start, TokenKind::Eof)),
             Some(c) => {
-                self.advance();
+                let _ = self.advance();
                 match c {
-                    '.' => Ok(Token::Dot),
-                    '(' => Ok(Token::LParen),
-                    ')' => Ok(Token::RParen),
-                    '[' => Ok(Token::LBracket),
-                    ']' => Ok(Token::RBracket),
-                    ',' => Ok(Token::Comma),
-                    '+' => Ok(Token::Plus),
-                    '-' => Ok(Token::Minus),
-                    '*' => Ok(Token::Star),
-                    '/' => Ok(Token::Slash),
-                    '%' => Ok(Token::Percent),
+                    '.' => Ok(self.token(start, TokenKind::Dot)),
+                    '(' => Ok(self.token(start, TokenKind::LParen)),
+                    ')' => Ok(self.token(start, TokenKind::RParen)),
+                    '[' => Ok(self.token(start, TokenKind::LBracket)),
+                    ']' => Ok(self.token(start, TokenKind::RBracket)),
+                    ',' => Ok(self.token(start, TokenKind::Comma)),
+                    '+' => Ok(self.token(start, TokenKind::Plus)),
+                    '-' => Ok(self.token(start, TokenKind::Minus)),
+                    '*' => Ok(self.token(start, TokenKind::Star)),
+                    '/' => Ok(self.token(start, TokenKind::Slash)),
+                    '%' => Ok(self.token(start, TokenKind::Percent)),
                     '=' => {
                         if self.peek_char() == Some('=') {
-                            self.advance();
-                            Ok(Token::EqEq)
+                            let _ = self.advance();
+                            Ok(self.token(start, TokenKind::EqEq))
                         } else {
                             Err(CrabaseError::ExprParse(format!(
-                                "Unexpected character '=' at pos {}",
-                                self.pos
+                                "Unexpected character '=' at {start}"
                             )))
                         }
                     }
                     '!' => {
                         if self.peek_char() == Some('=') {
-                            self.advance();
-                            Ok(Token::BangEq)
+                            let _ = self.advance();
+                            Ok(self.token(start, TokenKind::BangEq))
                         } else {
-                            Ok(Token::Bang)
+                            Ok(self.token(start, TokenKind::Bang))
                         }
                     }
                     '>' => {
                         if self.peek_char() == Some('=') {
-                            self.advance();
-                            Ok(Token::GtEq)
+                            let _ = self.advance();
+                            Ok(self.token(start, TokenKind::GtEq))
                         } else {
-                            Ok(Token::Gt)
+                            Ok(self.token(start, TokenKind::Gt))
                         }
                     }
                     '<' => {
                         if self.peek_char() == Some('=') {
-                            self.advance();
-                            Ok(Token::LtEq)
+                            let _ = self.advance();
+                            Ok(self.token(start, TokenKind::LtEq))
                         } else {
-                            Ok(Token::Lt)
+                            Ok(self.token(start, TokenKind::Lt))
                         }
                     }
                     '&' => {
                         if self.peek_char() == Some('&') {
-                            self.advance();
-                            Ok(Token::AmpAmp)
+                            let _ = self.advance();
+                            Ok(self.token(start, TokenKind::AmpAmp))
                         } else {
-                            Err(CrabaseError::ExprParse(format!(
-                                "Expected '&&' at pos {}",
-                                self.pos
-                            )))
+                            Err(CrabaseError::ExprParse(format!("Expected '&&' at {start}")))
                         }
                     }
                     '|' => {
                         if self.peek_char() == Some('|') {
-                            self.advance();
-                            Ok(Token::PipePipe)
+                            let _ = self.advance();
+                            Ok(self.token(start, TokenKind::PipePipe))
                         } else {
-                            Err(CrabaseError::ExprParse(format!(
-                                "Expected '||' at pos {}",
-                                self.pos
-                            )))
+                            Err(CrabaseError::ExprParse(format!("Expected '||' at {start}")))
                         }
                     }
-                    '\'' => self.read_string('\''),
-                    '"' => self.read_string('"'),
-                    c if c.is_ascii_digit() => Ok(self.read_number(c)),
-                    c if c.is_alphabetic() || c == '_' => Ok(self.read_ident(c)),
+                    '\'' => self.read_string('\'', start),
+                    '"' => self.read_string('"', start),
+                    c if c.is_ascii_digit() => self.read_number(c, start),
+                    c if c.is_alphabetic() || c == '_' => Ok(self.read_ident(c, start)),
                     other => Err(CrabaseError::ExprParse(format!(
-                        "Unexpected character '{}' at pos {}",
-                        other, self.pos
+                        "Unexpected character '{other}' at {start}"
                     ))),
                 }
             }
         }
     }
 
-    /// Tokenize the entire input into a Vec<Token>
     pub fn tokenize(&mut self) -> Result<Vec<Token>> {
         let mut tokens = Vec::new();
         loop {
-            let tok = self.next_token()?;
-            let is_eof = tok == Token::Eof;
-            tokens.push(tok);
+            let token = self.next_token()?;
+            let is_eof = token.kind == TokenKind::Eof;
+            tokens.push(token);
             if is_eof {
                 break;
             }

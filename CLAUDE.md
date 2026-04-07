@@ -97,10 +97,10 @@ src/
   output.rs       - CSV output formatting
   expr/
     mod.rs        - Re-exports
-    lexer.rs      - Tokenizer for expression language
-    ast.rs        - AST node types (Expr, BinOp, UnaryOp)
-    parser.rs     - Recursive descent parser
-    eval.rs       - Evaluator with EvalContext and Value enum
+    lexer.rs      - Spanned tokenizer for expression language
+    ast.rs        - Typed AST with spans, literals, and identifiers
+    parser.rs     - Pratt parser for expressions and postfix chains
+    eval.rs       - Evaluator with EvalContext, formula cycle detection, and Value enum
 tests/
   integration.rs  - Integration tests using insta snapshot testing
                     plus property-based parser/evaluator checks via proptest
@@ -124,7 +124,8 @@ crabase base:query file=<path-relative-to-vault> format=csv [vault=<vault_root>]
 ## Key Design Decisions
 
 - `FilterNode` is an ADT (And/Or/Not/Expr) parsed from YAML
-- Expression language uses a recursive descent parser and a `Value` enum for runtime values
+- Expression language uses a Pratt parser, a typed AST with source spans, and a `Value` enum for runtime values
 - `VaultFile` aggregates all file metadata and parsed frontmatter
 - The `title` column is special: outputs `[[path/to/file.md| Display Text]]` (note the space after `|`)
 - YAML frontmatter wikilinks (e.g., `[[All Souls]]`) are stored as strings and output as-is in CSV
+- Formula evaluation detects cycles and returns a structured evaluation error instead of recursing indefinitely
