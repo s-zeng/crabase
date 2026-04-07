@@ -1,0 +1,17 @@
+filters:
+  and:
+    - "file.inFolder(\"Church/Sermons\")"
+formulas:
+  sort_key: wc
+  missing_calc: missing + 1
+views:
+  - type: table
+    name: "Formula Sort Ignored"
+    order:
+      - title
+      - formula.missing_calc
+    sort:
+      - property: formula.sort_key
+        direction: DESC
+      - property: date
+        direction: ASC

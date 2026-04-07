@@ -63,7 +63,10 @@ fn sort_keys(view: &View) -> Vec<(&str, &SortDirection)> {
 }
 
 /// Sort files according to view's groupBy and sort fields
-fn sort_files(files: Vec<VaultFile>, view: &View) -> Vec<VaultFile> {
+fn sort_files(
+    files: Vec<VaultFile>,
+    view: &View,
+) -> Vec<VaultFile> {
     let sort_keys = sort_keys(view);
     if sort_keys.is_empty() {
         return files;
@@ -84,7 +87,7 @@ fn sort_files(files: Vec<VaultFile>, view: &View) -> Vec<VaultFile> {
                 }
             })
             .find(|ord| *ord != std::cmp::Ordering::Equal)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .unwrap_or_else(|| left.stem.cmp(&right.stem))
     });
     sorted
 }

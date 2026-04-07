@@ -1,0 +1,15 @@
+filters:
+  and:
+    - file.folder == "Tasks"
+views:
+  - type: table
+    name: "Name Tiebreak"
+    order:
+      - file.name
+      - priority
+      - timeEstimate
+    sort:
+      - property: priority
+        direction: DESC
+      - property: timeEstimate
+        direction: ASC

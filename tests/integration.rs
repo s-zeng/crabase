@@ -122,6 +122,22 @@ fn test_null_arithmetic_propagates_null() {
     insta::assert_snapshot!(output);
 }
 
+#[test]
+fn test_formula_sort_is_ignored_and_null_formula_csv_cell_is_blank() {
+    let vault = fixtures_vault();
+    let base_path = fixtures_base("formula_sort_ignored.base");
+    let output = run_query(&vault, &base_path, None);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn test_sort_ties_fall_back_to_file_name() {
+    let vault = fixtures_vault();
+    let base_path = fixtures_base("name_tiebreak.base");
+    let output = run_query(&vault, &base_path, None);
+    insta::assert_snapshot!(output);
+}
+
 fn eval_expr(expr_str: &str) -> String {
     use crabase_lib::expr::{EvalContext, eval, parse};
     use std::collections::HashMap;

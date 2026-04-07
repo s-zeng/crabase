@@ -1,0 +1,8 @@
+---
+source: tests/integration.rs
+expression: output
+---
+file name,priority,timeEstimate
+Alpha,1,1
+Beta,1,1
+Gamma,1,2
