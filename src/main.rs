@@ -4,6 +4,7 @@ use crabase_lib::base_file::BaseFile;
 use crabase_lib::error::{CrabaseError, Result};
 use crabase_lib::output::write_csv;
 use crabase_lib::query::execute_query;
+use crabase_lib::vault::scan_bases;
 
 /// Parse `key=value` style arguments from a list of strings.
 fn parse_kv_args(args: &[String]) -> std::collections::HashMap<String, String> {
@@ -22,18 +23,32 @@ fn parse_kv_args(args: &[String]) -> std::collections::HashMap<String, String> {
 fn run() -> Result<()> {
     let raw_args: Vec<String> = std::env::args().collect();
 
-    // Expect: crabase base:query <key=value>...
+    // Expect: crabase <subcommand> <key=value>...
     if raw_args.len() < 2 {
         eprintln!(
-            "Usage: crabase base:query file=<path> format=csv [vault=<vault_root>] [view=<view_name>]"
+            "Usage: crabase <subcommand> [args]\n  base:query file=<path> format=csv [vault=<vault_root>] [view=<view_name>]\n  bases [vault=<vault_root>]"
         );
         return Err(CrabaseError::MissingArg("subcommand".to_string()));
     }
 
     let subcommand = &raw_args[1];
+
+    if subcommand == "bases" {
+        let kv_args = parse_kv_args(&raw_args[2..]);
+        let vault_root = kv_args
+            .get("vault")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let paths = scan_bases(&vault_root)?;
+        for path in paths {
+            println!("{path}");
+        }
+        return Ok(());
+    }
+
     if subcommand != "base:query" {
         return Err(CrabaseError::Query(format!(
-            "Unknown subcommand: {subcommand}. Expected 'base:query'"
+            "Unknown subcommand: {subcommand}. Expected 'base:query' or 'bases'"
         )));
     }
 

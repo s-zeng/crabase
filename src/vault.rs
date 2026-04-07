@@ -99,6 +99,26 @@ fn yaml_to_value(v: &serde_yaml::Value) -> Value {
     }
 }
 
+/// Return relative paths of all `.base` files in the vault, sorted.
+pub fn scan_bases(vault_root: &Path) -> Result<Vec<String>> {
+    let mut paths: Vec<String> = WalkDir::new(vault_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("base"))
+        .filter_map(|e| {
+            e.path()
+                .strip_prefix(vault_root)
+                .ok()
+                .and_then(|p| p.to_str())
+                .map(|s| s.replace('\\', "/"))
+        })
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
 /// Scan a vault directory and return all .md files
 pub fn scan_vault(vault_root: &Path) -> Result<Vec<VaultFile>> {
     WalkDir::new(vault_root)
