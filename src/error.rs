@@ -8,6 +8,9 @@ pub enum CrabaseError {
     #[error("YAML parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
 
+    #[error("Polars error: {0}")]
+    Polars(#[from] polars::prelude::PolarsError),
+
     #[error("Base file error: {0}")]
     BaseFile(String),
 

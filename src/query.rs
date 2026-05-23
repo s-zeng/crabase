@@ -1,174 +1,167 @@
-use std::collections::HashMap;
+//! Orchestrate a query end-to-end: scan vault → filter → sort → limit → select.
+//!
+//! Everything is composed at the LazyFrame level; the only materialisation is
+//! the final `.collect()` returning a `DataFrame` to the output layer.
+
 use std::path::Path;
+
+use polars::prelude::*;
 
 use crate::base_file::{BaseFile, SortDirection, View};
 use crate::error::Result;
-use crate::expr::eval::compare_values;
-use crate::expr::{EvalContext, eval, parse};
-use crate::filter::file_passes_filters;
-use crate::vault::{VaultFile, scan_vault};
+use crate::expr::{TranslateCtx, parse, translate};
+use crate::filter::combine_filters;
+use crate::vault::{VaultSchema, scan_vault_to_lazyframe};
 
-/// A single row of query results
-#[derive(Debug)]
-pub struct ResultRow {
-    pub columns: Vec<serde_yaml::Value>,
-}
-
-/// Execute the query for a given view and return rows
+/// Execute a query against the vault for a given view, returning the result as
+/// a polars `DataFrame`. Column order matches `view.order`.
 pub fn execute_query(
     vault_root: &Path,
     base_file: &BaseFile,
     view: &View,
-) -> Result<Vec<ResultRow>> {
-    let files = scan_vault(vault_root)?;
-    let matched = files
-        .into_iter()
-        .filter_map(|file| {
-            match file_passes_filters(
-                &file,
-                base_file.filters.as_ref(),
-                view.filters.as_ref(),
-                &base_file.formulas,
-            ) {
-                Ok(true) => Some(Ok(file)),
-                Ok(false) => None,
-                Err(error) => Some(Err(error)),
-            }
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let columns = view.order.as_deref().unwrap_or(&[]);
+) -> Result<DataFrame> {
+    let (mut lf, schema) = scan_vault_to_lazyframe(vault_root)?;
+    let ctx = TranslateCtx::new(&schema, &base_file.formulas);
 
-    sort_files(matched, view)
-        .into_iter()
-        .take(view.limit.unwrap_or(usize::MAX))
-        .map(|file| {
-            columns
-                .iter()
-                .map(|column| extract_column(&file, column, &base_file.formulas))
-                .collect::<Result<Vec<_>>>()
-                .map(|columns| ResultRow { columns })
-        })
-        .collect()
+    let predicate = combine_filters(base_file.filters.as_ref(), view.filters.as_ref(), &ctx)?;
+    lf = lf.filter(predicate);
+
+    if let Some((exprs, descending)) = sort_exprs(view, &ctx, &schema)? {
+        lf = lf.sort_by_exprs(
+            exprs,
+            SortMultipleOptions::new()
+                .with_order_descending_multi(descending)
+                .with_nulls_last(true)
+                .with_maintain_order(true),
+        );
+    }
+
+    if let Some(n) = view.limit {
+        lf = lf.limit(n as u32);
+    }
+
+    let column_exprs = column_select_exprs(view, &ctx, &schema)?;
+    let df = lf.select(column_exprs).collect()?;
+    Ok(df)
 }
 
-fn sort_keys(view: &View) -> Vec<(&str, &SortDirection)> {
-    view.group_by
-        .iter()
-        .map(|group_by| (group_by.property.as_str(), &group_by.direction))
-        .chain(view.sort.iter().flat_map(|keys| {
-            keys.iter()
-                .map(|key| (key.property.as_str(), &key.direction))
-        }))
-        .collect()
-}
-
-/// Sort files according to view's groupBy and sort fields
-fn sort_files(
-    files: Vec<VaultFile>,
+/// Build the list of polars expressions to sort by. Always appends a
+/// tie-breaker on `file_name` ascending.
+fn sort_exprs(
     view: &View,
-) -> Vec<VaultFile> {
-    let sort_keys = sort_keys(view);
-    if sort_keys.is_empty() {
-        return files;
+    ctx: &TranslateCtx,
+    schema: &VaultSchema,
+) -> Result<Option<(Vec<Expr>, Vec<bool>)>> {
+    let mut exprs: Vec<Expr> = Vec::new();
+    let mut descending: Vec<bool> = Vec::new();
+
+    if let Some(gb) = &view.group_by {
+        let e = property_to_expr(&gb.property, ctx, schema)?;
+        exprs.push(e);
+        descending.push(matches!(gb.direction, SortDirection::Desc));
     }
-
-    let mut sorted = files;
-    sorted.sort_by(|left, right| {
-        sort_keys
-            .iter()
-            .map(|(property, direction)| {
-                let ord = compare_values(
-                    &get_sort_value(left, property),
-                    &get_sort_value(right, property),
-                );
-                match direction {
-                    SortDirection::Asc => ord,
-                    SortDirection::Desc => ord.reverse(),
-                }
-            })
-            .find(|ord| *ord != std::cmp::Ordering::Equal)
-            .unwrap_or_else(|| left.stem.cmp(&right.stem))
-    });
-    sorted
-}
-
-fn get_sort_value(file: &VaultFile, prop: &str) -> crate::expr::eval::Value {
-    use crate::expr::eval::Value;
-
-    match prop.split_once('.') {
-        Some(("file", field)) => file.file_props().get(field).cloned().unwrap_or(Value::Null),
-        Some(("note", field)) => file.note_props().get(field).cloned().unwrap_or(Value::Null),
-        _ => file.note_props().get(prop).cloned().unwrap_or(Value::Null),
-    }
-}
-
-/// Extract a column value for a file
-fn extract_column(
-    file: &VaultFile,
-    column: &str,
-    formulas: &HashMap<String, String>,
-) -> Result<serde_yaml::Value> {
-    if column == "title" {
-        let display = file
-            .frontmatter
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&file.stem)
-            .to_string();
-        return Ok(serde_yaml::Value::String(format!(
-            "[[{}| {}]]",
-            file.rel_path, display
-        )));
-    }
-
-    if let Some(field) = column.strip_prefix("file.") {
-        let value = file
-            .file_props()
-            .get(field)
-            .cloned()
-            .unwrap_or(crate::expr::eval::Value::Null);
-        return Ok(value_to_yaml(&value));
-    }
-
-    if let Some(formula_name) = column.strip_prefix("formula.") {
-        return formulas
-            .get(formula_name)
-            .map(|expr_str| {
-                let ctx = EvalContext::new(file.file_props(), file.note_props(), formulas.clone());
-                let ast = parse(expr_str)?;
-                let value = eval(&ast, &ctx)?;
-                Ok(value_to_yaml(&value))
-            })
-            .transpose()
-            .map(|value| value.unwrap_or(serde_yaml::Value::Null));
-    }
-
-    if let Some(field) = column.strip_prefix("note.") {
-        return Ok(file
-            .frontmatter
-            .get(field)
-            .cloned()
-            .unwrap_or(serde_yaml::Value::Null));
-    }
-
-    Ok(file
-        .frontmatter
-        .get(column)
-        .cloned()
-        .unwrap_or(serde_yaml::Value::Null))
-}
-
-fn value_to_yaml(val: &crate::expr::eval::Value) -> serde_yaml::Value {
-    use crate::expr::eval::Value;
-
-    match val {
-        Value::Null => serde_yaml::Value::Null,
-        Value::Bool(b) => serde_yaml::Value::Bool(*b),
-        Value::Number(n) => serde_yaml::to_value(*n).unwrap_or(serde_yaml::Value::Null),
-        Value::Str(s) => serde_yaml::Value::String(s.clone()),
-        Value::Date(dt) => serde_yaml::Value::String(dt.format("%Y-%m-%d %H:%M:%S").to_string()),
-        Value::List(items) => {
-            serde_yaml::Value::Sequence(items.iter().map(value_to_yaml).collect())
+    if let Some(sorts) = &view.sort {
+        for key in sorts {
+            let e = property_to_expr(&key.property, ctx, schema)?;
+            exprs.push(e);
+            descending.push(matches!(key.direction, SortDirection::Desc));
         }
     }
+
+    if exprs.is_empty() {
+        return Ok(None);
+    }
+    // Tie-break by file_name ascending (matches old behavior).
+    exprs.push(col("file_name"));
+    descending.push(false);
+    Ok(Some((exprs, descending)))
+}
+
+/// Convert a property name (as appears in `groupBy.property` or `sort[].property`)
+/// to a polars expression. Supports `file.X`, `note.X`, `formula.X`, and bare
+/// frontmatter keys.
+fn property_to_expr(prop: &str, ctx: &TranslateCtx, schema: &VaultSchema) -> Result<Expr> {
+    if let Some(rest) = prop.strip_prefix("file.") {
+        let col_name = format!("file_{rest}");
+        if schema.has_column(&col_name) {
+            return Ok(col(col_name));
+        }
+        return Ok(lit(NULL));
+    }
+    if let Some(rest) = prop.strip_prefix("note.") {
+        if let Some(name) = schema.resolve_frontmatter(rest) {
+            return Ok(col(name.to_string()));
+        }
+        return Ok(lit(NULL));
+    }
+    if let Some(rest) = prop.strip_prefix("formula.") {
+        if let Some(body) = ctx.formulas.get(rest) {
+            let ast = parse(body)?;
+            let t = translate(&ast, ctx)?;
+            return Ok(t.expr);
+        }
+        return Ok(lit(NULL));
+    }
+    if let Some(name) = schema.resolve_frontmatter(prop) {
+        return Ok(col(name.to_string()));
+    }
+    Ok(lit(NULL))
+}
+
+/// Build the `select` expressions, one per `view.order` column, applying the
+/// `title` special case and the rename to the output header.
+fn column_select_exprs(
+    view: &View,
+    ctx: &TranslateCtx,
+    schema: &VaultSchema,
+) -> Result<Vec<Expr>> {
+    let order = view.order.clone().unwrap_or_default();
+    order
+        .iter()
+        .map(|c| column_to_expr(c, ctx, schema).map(|e| e.alias(c.as_str())))
+        .collect()
+}
+
+fn column_to_expr(column: &str, ctx: &TranslateCtx, schema: &VaultSchema) -> Result<Expr> {
+    if column == "title" {
+        // Special: [[<file_path>| <title-or-stem>]]
+        let display = if schema.has_column("title") {
+            // Use frontmatter title if not null, else file_name (stem).
+            when(col("title").is_not_null())
+                .then(col("title").cast(DataType::String))
+                .otherwise(col("file_name"))
+        } else {
+            col("file_name")
+        };
+        return Ok(concat_str(
+            vec![lit("[["), col("file_path"), lit("| "), display, lit("]]")],
+            "",
+            true,
+        ));
+    }
+    if let Some(rest) = column.strip_prefix("file.") {
+        let col_name = format!("file_{rest}");
+        if schema.has_column(&col_name) {
+            return Ok(col(col_name));
+        }
+        return Ok(lit(NULL));
+    }
+    if let Some(rest) = column.strip_prefix("formula.") {
+        if let Some(body) = ctx.formulas.get(rest) {
+            let ast = parse(body)?;
+            let t = translate(&ast, ctx)?;
+            return Ok(t.expr);
+        }
+        return Ok(lit(NULL));
+    }
+    if let Some(rest) = column.strip_prefix("note.") {
+        if let Some(name) = schema.resolve_frontmatter(rest) {
+            return Ok(col(name.to_string()));
+        }
+        return Ok(lit(NULL));
+    }
+    if let Some(name) = schema.resolve_frontmatter(column) {
+        return Ok(col(name.to_string()));
+    }
+    Ok(lit(NULL))
 }

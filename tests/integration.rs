@@ -1,4 +1,6 @@
+use polars::prelude::*;
 use proptest::prelude::*;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn fixtures_vault() -> PathBuf {
@@ -21,11 +23,162 @@ fn run_query(vault: &std::path::Path, base_path: &std::path::Path, view: Option<
     let base_file = BaseFile::parse(&content).expect("parse base file");
     let view_obj = base_file.get_view(view).expect("get view");
     let columns = view_obj.order.clone().unwrap_or_default();
-    let rows = execute_query(vault, &base_file, view_obj).expect("execute query");
+    let df = execute_query(vault, &base_file, view_obj).expect("execute query");
     let mut out = Vec::new();
-    write_csv(&mut out, &columns, &rows, &base_file).expect("write csv");
+    write_csv(&mut out, &columns, &df, &base_file).expect("write csv");
     String::from_utf8(out).expect("utf8 output")
 }
+
+/// Evaluate a single expression against a 1-row LazyFrame containing the given
+/// named values. Returns the result rendered with the same display rules used
+/// in the CSV writer.
+fn eval_expr_with_inputs(expr_str: &str, inputs: Vec<(&str, AnyValue<'static>)>) -> String {
+    use crabase_lib::expr::{TranslateCtx, parse, translate};
+    use crabase_lib::vault::VaultSchema;
+
+    let mut columns: Vec<Column> = Vec::new();
+    let mut frontmatter_keys: HashMap<String, String> = HashMap::new();
+    for (name, val) in inputs {
+        let series = Series::from_any_values(name.into(), &[val], true).expect("series");
+        columns.push(series.into_column());
+        frontmatter_keys.insert(name.to_string(), name.to_string());
+    }
+    // Polars requires at least one column with a known length.
+    if columns.is_empty() {
+        columns.push(Column::new("__crabase_anchor__".into(), &[0i64]));
+    }
+    let df = DataFrame::new(columns).expect("dataframe");
+    let schema_ref = df.schema().clone();
+    let schema = VaultSchema {
+        schema: schema_ref,
+        frontmatter_keys,
+    };
+    let formulas: HashMap<String, String> = HashMap::new();
+    let ctx = TranslateCtx::new(&schema, &formulas);
+    let ast = parse(expr_str).expect("parse");
+    let translated = translate(&ast, &ctx).expect("translate");
+    let result = df
+        .lazy()
+        .select([translated.expr.alias("__crabase_result__")])
+        .collect()
+        .expect("collect");
+    let col = result.column("__crabase_result__").expect("result col");
+    let series = col.as_materialized_series();
+    let v = series.get(0).expect("row 0");
+    format_for_test(&v)
+}
+
+fn eval_expr_with_formulas(
+    expr_str: &str,
+    formulas_vec: Vec<(&str, &str)>,
+    inputs: Vec<(&str, AnyValue<'static>)>,
+) -> Result<String, String> {
+    use crabase_lib::expr::{TranslateCtx, parse, translate};
+    use crabase_lib::vault::VaultSchema;
+
+    let mut columns: Vec<Column> = Vec::new();
+    let mut frontmatter_keys: HashMap<String, String> = HashMap::new();
+    for (name, val) in inputs {
+        let series = Series::from_any_values(name.into(), &[val], true).map_err(|e| e.to_string())?;
+        columns.push(series.into_column());
+        frontmatter_keys.insert(name.to_string(), name.to_string());
+    }
+    if columns.is_empty() {
+        columns.push(Column::new("__crabase_anchor__".into(), &[0i64]));
+    }
+    let df = DataFrame::new(columns).map_err(|e| e.to_string())?;
+    let schema_ref = df.schema().clone();
+    let schema = VaultSchema {
+        schema: schema_ref,
+        frontmatter_keys,
+    };
+    let formulas: HashMap<String, String> = formulas_vec
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let ctx = TranslateCtx::new(&schema, &formulas);
+    let ast = parse(expr_str).map_err(|e| e.to_string())?;
+    let translated = translate(&ast, &ctx).map_err(|e| e.to_string())?;
+    let result = df
+        .lazy()
+        .select([translated.expr.alias("__crabase_result__")])
+        .collect()
+        .map_err(|e| e.to_string())?;
+    let col = result
+        .column("__crabase_result__")
+        .map_err(|e| e.to_string())?;
+    let series = col.as_materialized_series();
+    let v = series.get(0).map_err(|e| e.to_string())?;
+    Ok(format_for_test(&v))
+}
+
+fn eval_expr(expr_str: &str) -> String {
+    eval_expr_with_inputs(expr_str, vec![])
+}
+
+fn format_for_test(v: &AnyValue<'_>) -> String {
+    match v {
+        AnyValue::Null => String::new(),
+        AnyValue::Boolean(b) => b.to_string(),
+        AnyValue::String(s) => s.to_string(),
+        AnyValue::StringOwned(s) => s.to_string(),
+        AnyValue::Int8(n) => n.to_string(),
+        AnyValue::Int16(n) => n.to_string(),
+        AnyValue::Int32(n) => n.to_string(),
+        AnyValue::Int64(n) => n.to_string(),
+        AnyValue::UInt8(n) => n.to_string(),
+        AnyValue::UInt16(n) => n.to_string(),
+        AnyValue::UInt32(n) => n.to_string(),
+        AnyValue::UInt64(n) => n.to_string(),
+        AnyValue::Float32(f) => format_float(*f as f64),
+        AnyValue::Float64(f) => format_float(*f),
+        AnyValue::Date(days) => {
+            let base = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            (base + chrono::Duration::days(*days as i64))
+                .format("%Y-%m-%d")
+                .to_string()
+        }
+        AnyValue::Datetime(micros, tu, _) => {
+            let (secs, nsec) = micros_split(*micros, *tu);
+            chrono::DateTime::from_timestamp(secs, nsec)
+                .map(|dt| dt.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_default()
+        }
+        AnyValue::DatetimeOwned(micros, tu, _) => {
+            let (secs, nsec) = micros_split(*micros, *tu);
+            chrono::DateTime::from_timestamp(secs, nsec)
+                .map(|dt| dt.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_default()
+        }
+        AnyValue::Duration(n, _) => n.to_string(),
+        AnyValue::List(s) => (0..s.len())
+            .map(|i| s.get(i).map(|v| format_for_test(&v)).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(", "),
+        other => format!("{other}"),
+    }
+}
+
+fn micros_split(value: i64, tu: TimeUnit) -> (i64, u32) {
+    match tu {
+        TimeUnit::Nanoseconds => (value / 1_000_000_000, (value % 1_000_000_000) as u32),
+        TimeUnit::Microseconds => (value / 1_000_000, ((value % 1_000_000) * 1_000) as u32),
+        TimeUnit::Milliseconds => (value / 1_000, ((value % 1_000) * 1_000_000) as u32),
+    }
+}
+
+fn format_float(f: f64) -> String {
+    if f.is_nan() {
+        return String::new();
+    }
+    if f.fract() == 0.0 && f.abs() < 1e15 {
+        format!("{}", f as i64)
+    } else {
+        format!("{f}")
+    }
+}
+
+// ---------- CSV-output snapshot tests (operate end-to-end) ----------
 
 #[test]
 fn test_sermons_query_csv() {
@@ -44,78 +197,7 @@ fn test_in_folder_filter_excludes_notes() {
 }
 
 #[test]
-fn test_filter_node_and() {
-    use crabase_lib::base_file::FilterNode;
-    use crabase_lib::filter::eval_filter;
-    use std::collections::HashMap;
-
-    let node = FilterNode::And(vec![
-        FilterNode::Expr("session == 1130".to_string()),
-        FilterNode::Expr("wc > 500".to_string()),
-    ]);
-
-    let vault = fixtures_vault();
-    let files = crabase_lib::vault::scan_vault(&vault).expect("scan vault");
-    let sermon = files
-        .iter()
-        .find(|f| f.name.contains("House of Blood"))
-        .expect("find sermon");
-
-    let result = eval_filter(&node, sermon, &HashMap::new()).expect("eval filter");
-    insta::assert_snapshot!(result.to_string());
-}
-
-#[test]
-fn test_expression_comparison() {
-    use crabase_lib::expr::{EvalContext, eval, parse};
-    use std::collections::HashMap;
-
-    let ctx = EvalContext::new(
-        HashMap::new(),
-        {
-            let mut m = HashMap::new();
-            m.insert(
-                "session".to_string(),
-                crabase_lib::expr::eval::Value::Number(1130.0),
-            );
-            m
-        },
-        HashMap::new(),
-    );
-
-    let ast = parse("session == 1130").expect("parse");
-    let val = eval(&ast, &ctx).expect("eval");
-    insta::assert_snapshot!(val.to_display());
-}
-
-#[test]
-fn test_expression_string_concat() {
-    use crabase_lib::expr::{EvalContext, eval, parse};
-    use std::collections::HashMap;
-
-    let ctx = EvalContext::new(
-        HashMap::new(),
-        {
-            let mut m = HashMap::new();
-            m.insert(
-                "title".to_string(),
-                crabase_lib::expr::eval::Value::Str("Hello".to_string()),
-            );
-            m
-        },
-        HashMap::new(),
-    );
-
-    let ast = parse("title + \" World\"").expect("parse");
-    let val = eval(&ast, &ctx).expect("eval");
-    insta::assert_snapshot!(val.to_display());
-}
-
-#[test]
 fn test_null_arithmetic_propagates_null() {
-    // Reproduces: "Cannot subtract Number(7.0) and Null"
-    // When a note is missing a numeric property and a formula does arithmetic on it,
-    // the result should be Null (not an error).
     let vault = fixtures_vault();
     let base_path = fixtures_base("null_arith.base");
     let output = run_query(&vault, &base_path, None);
@@ -138,35 +220,99 @@ fn test_sort_ties_fall_back_to_file_name() {
     insta::assert_snapshot!(output);
 }
 
-fn eval_expr(expr_str: &str) -> String {
-    use crabase_lib::expr::{EvalContext, eval, parse};
-    use std::collections::HashMap;
-    let ctx = EvalContext::new(HashMap::new(), HashMap::new(), HashMap::new());
-    let ast = parse(expr_str).expect("parse");
-    eval(&ast, &ctx).expect("eval").to_display()
+#[test]
+fn test_base_views() {
+    use crabase_lib::base_file::BaseFile;
+    let base_path = fixtures_base("test.base");
+    let content = std::fs::read_to_string(&base_path).expect("read base file");
+    let base_file = BaseFile::parse(&content).expect("parse base file");
+    let output: Vec<String> = base_file
+        .views
+        .iter()
+        .map(|v| v.name.clone().unwrap_or_else(|| "(unnamed)".to_string()))
+        .collect();
+    insta::assert_snapshot!(output.join("\n"));
 }
 
-fn eval_expr_result(
-    expr_str: &str,
-    formulas: Vec<(&str, &str)>,
-    note_props: Vec<(&str, crabase_lib::expr::eval::Value)>,
-) -> Result<String, String> {
-    use crabase_lib::expr::{EvalContext, eval, parse};
-    use std::collections::HashMap;
+#[test]
+fn test_column_header_formula_prefix_stripped() {
+    use crabase_lib::base_file::BaseFile;
+    use crabase_lib::output::write_csv;
+    use crabase_lib::query::execute_query;
+    let vault = fixtures_vault();
+    let base_path = fixtures_base("test.base");
+    let content = std::fs::read_to_string(&base_path).expect("read base file");
+    let base_file = BaseFile::parse(&content).expect("parse base file");
+    let view = base_file.get_view(None).expect("get view");
+    let columns = view.order.clone().unwrap_or_default();
+    let df = execute_query(&vault, &base_file, view).expect("execute query");
+    let mut out = Vec::new();
+    write_csv(&mut out, &columns, &df, &base_file).expect("write csv");
+    let csv = String::from_utf8(out).expect("utf8");
+    let header = csv.lines().next().unwrap_or("");
+    insta::assert_snapshot!(
+        (!header.contains("formula.") && !header.contains("file.")).to_string()
+    );
+}
 
-    let formula_map: HashMap<String, String> = formulas
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-    let note_map: HashMap<String, crabase_lib::expr::eval::Value> = note_props
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect();
-    let ctx = EvalContext::new(HashMap::new(), note_map, formula_map);
-    let ast = parse(expr_str).map_err(|error| error.to_string())?;
-    eval(&ast, &ctx)
-        .map(|value| value.to_display())
-        .map_err(|error| error.to_string())
+// ---------- Filter / vault unit tests ----------
+
+#[test]
+fn test_filter_node_and() {
+    use crabase_lib::base_file::FilterNode;
+    use crabase_lib::expr::TranslateCtx;
+    use crabase_lib::filter::filter_node_to_expr;
+    use crabase_lib::vault::scan_vault_to_lazyframe;
+
+    let vault = fixtures_vault();
+    let (lf, schema) = scan_vault_to_lazyframe(&vault).expect("scan");
+    let formulas: HashMap<String, String> = HashMap::new();
+    let ctx = TranslateCtx::new(&schema, &formulas);
+
+    let node = FilterNode::And(vec![
+        FilterNode::Expr("session == 1130".to_string()),
+        FilterNode::Expr("wc > 500".to_string()),
+    ]);
+    let pred = filter_node_to_expr(&node, &ctx).expect("compile");
+    let df = lf
+        .filter(pred)
+        .filter(col("file_name").str().contains_literal(lit("House of Blood")))
+        .collect()
+        .expect("collect");
+    let count = df.height();
+    insta::assert_snapshot!((count == 1).to_string());
+}
+
+#[test]
+fn test_file_name_no_extension() {
+    use crabase_lib::vault::scan_vault_to_lazyframe;
+    let vault = fixtures_vault();
+    let (lf, _) = scan_vault_to_lazyframe(&vault).expect("scan");
+    let df = lf
+        .filter(col("file_name").str().contains_literal(lit("House of Blood")))
+        .select([col("file_name")])
+        .collect()
+        .expect("collect");
+    let s = df.column("file_name").unwrap().as_materialized_series();
+    insta::assert_snapshot!(s.get(0).unwrap().get_str().unwrap_or("").to_string());
+}
+
+// ---------- Expression-language tests (evaluate on a 1-row LazyFrame) ----------
+
+#[test]
+fn test_expression_comparison() {
+    insta::assert_snapshot!(eval_expr_with_inputs(
+        "session == 1130",
+        vec![("session", AnyValue::Int64(1130))]
+    ));
+}
+
+#[test]
+fn test_expression_string_concat() {
+    insta::assert_snapshot!(eval_expr_with_inputs(
+        "title + \" World\"",
+        vec![("title", AnyValue::StringOwned("Hello".into()))]
+    ));
 }
 
 #[test]
@@ -227,6 +373,57 @@ fn test_date_is_empty() {
 #[test]
 fn test_today_is_date_type() {
     insta::assert_snapshot!(eval_expr("today().isType(\"date\")"));
+}
+
+#[test]
+fn test_date_datetime_parse() {
+    insta::assert_snapshot!(eval_expr("date(\"2025-04-27 15:30:00\").hour"));
+}
+
+#[test]
+fn test_date_wikilink_parse() {
+    insta::assert_snapshot!(eval_expr("date(\"[[2025-01-15]]\").day"));
+}
+
+#[test]
+fn test_date_diff_days_property() {
+    insta::assert_snapshot!(eval_expr(
+        "(date(\"2025-01-11\") - date(\"2025-01-01\")).days"
+    ));
+}
+
+#[test]
+fn test_formula_bracket_access() {
+    let result = eval_expr_with_formulas("formula[\"double\"]", vec![("double", "6 * 7")], vec![])
+        .expect("eval");
+    insta::assert_snapshot!(result);
+}
+
+#[test]
+fn test_formula_cycle_detection() {
+    let err = eval_expr_with_formulas(
+        "formula.a",
+        vec![("a", "formula.b"), ("b", "formula.a")],
+        vec![],
+    )
+    .unwrap_err();
+    insta::assert_snapshot!(err, @"Expression eval error: Formula cycle detected: a -> b -> a");
+}
+
+#[test]
+fn test_list_map_value_variable() {
+    insta::assert_snapshot!(eval_expr_with_inputs(
+        "[n].map(value.toString() + \" days\")",
+        vec![("n", AnyValue::Int64(5))]
+    ));
+}
+
+#[test]
+fn test_list_map_null_passthrough() {
+    insta::assert_snapshot!(eval_expr_with_inputs(
+        "[n].map(if(value==null, null, value.toString() + \" days\"))",
+        vec![("n", AnyValue::Null)]
+    ));
 }
 
 #[test]
@@ -295,139 +492,6 @@ fn test_parser_reports_precise_error_positions() {
     insta::assert_snapshot!(error, @"Expression parse error: Expected identifier after '.' at 4, got Number(3.0)");
 }
 
-#[test]
-fn test_date_datetime_parse() {
-    insta::assert_snapshot!(eval_expr("date(\"2025-04-27 15:30:00\").hour"));
-}
-
-#[test]
-fn test_base_views() {
-    use crabase_lib::base_file::BaseFile;
-    let base_path = fixtures_base("test.base");
-    let content = std::fs::read_to_string(&base_path).expect("read base file");
-    let base_file = BaseFile::parse(&content).expect("parse base file");
-    let output: Vec<String> = base_file
-        .views
-        .iter()
-        .map(|v| v.name.clone().unwrap_or_else(|| "(unnamed)".to_string()))
-        .collect();
-    insta::assert_snapshot!(output.join("\n"));
-}
-
-fn eval_expr_with_formulas(
-    expr_str: &str,
-    formulas: Vec<(&str, &str)>,
-    note_props: Vec<(&str, crabase_lib::expr::eval::Value)>,
-) -> String {
-    use crabase_lib::expr::{EvalContext, eval, parse};
-    use std::collections::HashMap;
-    let formula_map: HashMap<String, String> = formulas
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-    let note_map: HashMap<String, crabase_lib::expr::eval::Value> = note_props
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect();
-    let ctx = EvalContext::new(HashMap::new(), note_map, formula_map);
-    let ast = parse(expr_str).expect("parse");
-    eval(&ast, &ctx).expect("eval").to_display()
-}
-
-#[test]
-fn test_date_wikilink_parse() {
-    // date() must strip [[...]] Obsidian wikilink brackets
-    insta::assert_snapshot!(eval_expr("date(\"[[2025-01-15]]\").day"));
-}
-
-#[test]
-fn test_date_diff_days_property() {
-    // (date - date).days should convert ms to integer days
-    insta::assert_snapshot!(eval_expr(
-        "(date(\"2025-01-11\") - date(\"2025-01-01\")).days"
-    ));
-}
-
-#[test]
-fn test_formula_bracket_access() {
-    // formula["name"] must evaluate the named formula
-    let result = eval_expr_with_formulas("formula[\"double\"]", vec![("double", "6 * 7")], vec![]);
-    insta::assert_snapshot!(result);
-}
-
-#[test]
-fn test_formula_cycle_detection() {
-    let result = eval_expr_result(
-        "formula.a",
-        vec![("a", "formula.b"), ("b", "formula.a")],
-        vec![],
-    )
-    .unwrap_or_else(|error| error);
-    insta::assert_snapshot!(result, @"Expression eval error: Formula cycle detected: a -> b -> a");
-}
-
-#[test]
-fn test_list_map_value_variable() {
-    // [x].map(if(value==null, null, value.toString() + " days"))
-    use crabase_lib::expr::eval::Value;
-    let result = eval_expr_with_formulas(
-        "[n].map(value.toString() + \" days\")",
-        vec![],
-        vec![("n", Value::Number(5.0))],
-    );
-    insta::assert_snapshot!(result);
-}
-
-#[test]
-fn test_list_map_null_passthrough() {
-    use crabase_lib::expr::eval::Value;
-    let result = eval_expr_with_formulas(
-        "[n].map(if(value==null, null, value.toString() + \" days\"))",
-        vec![],
-        vec![("n", Value::Null)],
-    );
-    insta::assert_snapshot!(result);
-}
-
-#[test]
-fn test_column_header_formula_prefix_stripped() {
-    use crabase_lib::base_file::BaseFile;
-    use crabase_lib::output::write_csv;
-    use crabase_lib::query::execute_query;
-    let vault = fixtures_vault();
-    let base_path = fixtures_base("test.base");
-    let content = std::fs::read_to_string(&base_path).expect("read base file");
-    let base_file = BaseFile::parse(&content).expect("parse base file");
-    let view = base_file.get_view(None).expect("get view");
-    let columns = view.order.clone().unwrap_or_default();
-    let rows = execute_query(&vault, &base_file, view).expect("execute query");
-    let mut out = Vec::new();
-    write_csv(&mut out, &columns, &rows, &base_file).expect("write csv");
-    let csv = String::from_utf8(out).expect("utf8");
-    // Header line must not contain "formula." or "file." prefixes
-    let header = csv.lines().next().unwrap_or("");
-    insta::assert_snapshot!(
-        (!header.contains("formula.") && !header.contains("file.")).to_string()
-    );
-}
-
-#[test]
-fn test_file_name_no_extension() {
-    let vault = fixtures_vault();
-    let files = crabase_lib::vault::scan_vault(&vault).expect("scan vault");
-    let sermon = files
-        .iter()
-        .find(|f| f.stem.contains("House of Blood"))
-        .expect("find sermon");
-    let props = sermon.file_props();
-    let name = props
-        .get("name")
-        .cloned()
-        .unwrap_or(crabase_lib::expr::eval::Value::Null);
-    // file.name should be stem (no .md extension)
-    insta::assert_snapshot!(name.to_display());
-}
-
 proptest! {
     #[test]
     fn prop_addition_respects_precedence(
@@ -435,35 +499,17 @@ proptest! {
         b in -500i32..500,
         c in -500i32..500,
     ) {
-        use crabase_lib::expr::{eval, parse, EvalContext};
-        use std::collections::HashMap;
-
-        let ctx = EvalContext::new(HashMap::new(), HashMap::new(), HashMap::new());
-        let ast = parse(&format!("{a} + {b} * {c}")).expect("parse");
-        let val = eval(&ast, &ctx).expect("eval");
-
-        prop_assert_eq!(val, crabase_lib::expr::eval::Value::Number((a + b * c) as f64));
+        let result = eval_expr(&format!("{a} + {b} * {c}"));
+        prop_assert_eq!(result, (a + b * c).to_string());
     }
 
     #[test]
-    fn prop_string_reverse_is_involution(input in ".*") {
-        use crabase_lib::expr::{eval, parse, EvalContext};
-        use std::collections::HashMap;
-
-        let ctx = EvalContext::new(
-            HashMap::new(),
-            [(
-                "value".to_string(),
-                crabase_lib::expr::eval::Value::Str(input.clone()),
-            )]
-            .into_iter()
-            .collect(),
-            HashMap::new(),
+    fn prop_string_reverse_is_involution(input in "[a-zA-Z0-9 ]*") {
+        let result = eval_expr_with_inputs(
+            "value.reverse().reverse()",
+            vec![("value", AnyValue::StringOwned(input.clone().into()))],
         );
-        let ast = parse("value.reverse().reverse()").expect("parse");
-        let val = eval(&ast, &ctx).expect("eval");
-
-        prop_assert_eq!(val, crabase_lib::expr::eval::Value::Str(input));
+        prop_assert_eq!(result, input);
     }
 
     #[test]
@@ -472,13 +518,7 @@ proptest! {
         b in -500i32..500,
         c in -500i32..500,
     ) {
-        use crabase_lib::expr::{eval, parse, EvalContext};
-        use std::collections::HashMap;
-
-        let ctx = EvalContext::new(HashMap::new(), HashMap::new(), HashMap::new());
-        let ast = parse(&format!("{a} - {b} - {c}")).expect("parse");
-        let val = eval(&ast, &ctx).expect("eval");
-
-        prop_assert_eq!(val, crabase_lib::expr::eval::Value::Number((a - b - c) as f64));
+        let result = eval_expr(&format!("{a} - {b} - {c}"));
+        prop_assert_eq!(result, (a - b - c).to_string());
     }
 }

@@ -83,27 +83,42 @@ This project uses jujutsu `jj` for version control
 
 ## Project Structure
 
-The project is organized as a Rust workspace with both a binary and library crate:
+The project is organized as a Rust workspace with both a binary and library crate.
+Polars (`LazyFrame` / `Expr`) is the core primitive: the entire vault is ingested
+into a single LazyFrame, and the expression language compiles to polars `Expr` at
+query-build time — there is no per-row runtime evaluator.
 
 ```
 src/
   lib.rs          - Library entry point (exposes all modules as `crabase_lib`)
   main.rs         - Binary entry point (CLI parsing + orchestration)
-  error.rs        - `CrabaseError` enum using thiserror
+  error.rs        - `CrabaseError` enum using thiserror (includes Polars variant)
   base_file.rs    - `.base` file YAML parsing: FilterNode, View, BaseFile
-  vault.rs        - Vault scanning: walks .md files, parses YAML frontmatter, extracts tags/links
-  filter.rs       - FilterNode evaluation against VaultFile
-  query.rs        - Query execution: filter + sort + column extraction
-  output.rs       - CSV output formatting
+  vault.rs        - Walks the vault, parses frontmatter, infers a column dtype
+                    for each frontmatter key (Int64 / Float64 / Boolean / Date /
+                    Datetime / List[String] / String), and assembles every file
+                    into a single LazyFrame plus a VaultSchema describing it
+  filter.rs       - Compiles a FilterNode tree into a polars `Expr` predicate
+  query.rs        - Orchestrator: filter → sort_by_exprs → limit → select → collect
+  output.rs       - DataFrame → CSV writer matching the legacy quoting rules
+                    (Polars's built-in CsvWriter is NOT used; custom row iteration
+                    preserves "5" vs "5.0", list comma-joining, etc.)
   expr/
     mod.rs        - Re-exports
     lexer.rs      - Spanned tokenizer for expression language
     ast.rs        - Typed AST with spans, literals, and identifiers
     parser.rs     - Pratt parser for expressions and postfix chains
-    eval.rs       - Evaluator with EvalContext, formula cycle detection, and Value enum
+    translate.rs  - AST → polars Expr translator. Tracks an InferredType through
+                    every node so methods route to the right namespace
+                    (str/list/dt), formulas inline at compile time with cycle
+                    detection, .map() callbacks become list.eval with the `value`
+                    binding mapped to col(""), file.hasTag/inFolder/hasLink
+                    expand into list.eval-based polars predicates.
 tests/
-  integration.rs  - Integration tests using insta snapshot testing
-                    plus property-based parser/evaluator checks via proptest
+  integration.rs  - Integration tests using insta snapshot testing. The
+                    `eval_expr_with_inputs` helper evaluates an expression on a
+                    one-row LazyFrame so per-expression tests are still concise.
+                    Property tests use proptest against the same helper.
   fixtures/
     vault/        - Small test vault with .md files in Church/Sermons/ and Notes/
     test.base     - Test .base file with folder filter and table view
@@ -123,9 +138,36 @@ crabase base:query file=<path-relative-to-vault> format=csv [vault=<vault_root>]
 
 ## Key Design Decisions
 
-- `FilterNode` is an ADT (And/Or/Not/Expr) parsed from YAML
-- Expression language uses a Pratt parser, a typed AST with source spans, and a `Value` enum for runtime values
-- `VaultFile` aggregates all file metadata and parsed frontmatter
-- The `title` column is special: outputs `[[path/to/file.md| Display Text]]` (note the space after `|`)
-- YAML frontmatter wikilinks (e.g., `[[All Souls]]`) are stored as strings and output as-is in CSV
-- Formula evaluation detects cycles and returns a structured evaluation error instead of recursing indefinitely
+- `FilterNode` is an ADT (And/Or/Not/Expr) parsed from YAML, compiled into a
+  single polars `Expr` predicate by `filter::filter_node_to_expr`.
+- Expression language uses a Pratt parser and a typed AST with source spans.
+  The runtime is **polars Expr**, not a custom `Value`-walking interpreter —
+  `expr::translate::translate` rewrites the AST into a polars expression once,
+  and polars handles evaluation against the LazyFrame.
+- The vault becomes a single LazyFrame. Each frontmatter key gets its own
+  typed column; the inferred dtype is the union-of-observations.
+- Reserved metadata columns are `file_path`, `file_name` (stem, no extension),
+  `file_folder`, `file_ext`, `file_size`, `file_ctime`, `file_mtime`,
+  `file_tags`, `file_links`. A frontmatter key colliding with any of these is
+  remapped to `note_<key>`.
+- The `title` column is special: outputs `[[path/to/file.md| Display Text]]`
+  (note the space after `|`). Built via `concat_str` in `query::column_to_expr`.
+- YAML frontmatter wikilinks (e.g., `[[All Souls]]`) stay as strings. The
+  dtype inference deliberately does NOT strip `[[ ]]` wrappers when probing
+  for date-like strings; only bare `YYYY-MM-DD` / `YYYY-MM-DD HH:MM:SS`
+  becomes Date / Datetime. The `date()` *function* (when explicitly called)
+  does strip wikilink wrappers.
+- Formula references resolve at translate time: `formula.X` inlines the
+  formula's AST into the caller's expression. Cycle detection happens during
+  this inlining via a `formula_stack` on `TranslateCtx`.
+- Truthiness: polars's null-as-null semantics are coerced to the
+  expression-language's null-as-false by wrapping every consumed boolean in
+  `.fill_null(false)`. The `truthy()` helper in `translate.rs` does this
+  based on the receiver's `InferredType`.
+- `value == null` and `value != null` translate to `.is_null()` /
+  `.is_not_null()` rather than polars equality (which yields null on null
+  inputs and silently misbehaves).
+- The custom CSV writer (`output::write_csv`) iterates DataFrame rows and
+  matches the legacy formatting: empty cells for null, integer-valued floats
+  printed as integers, list columns joined with `", "`, quoting only when a
+  cell contains `, " \n \r`.

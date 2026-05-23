@@ -121,11 +121,11 @@ fn run() -> Result<()> {
     // Get the column order for output
     let columns = view.order.clone().unwrap_or_default();
 
-    let rows = execute_query(&vault_root, &base_file, view)?;
+    let df = execute_query(&vault_root, &base_file, view)?;
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    write_csv(&mut out, &columns, &rows, &base_file).map_err(CrabaseError::Io)?;
+    write_csv(&mut out, &columns, &df, &base_file).map_err(CrabaseError::Io)?;
 
     Ok(())
 }

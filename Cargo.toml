@@ -23,6 +23,31 @@ serde_yaml = "0.9"
 walkdir = "2"
 thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
+polars = { version = "0.46", default-features = false, features = [
+    "lazy",
+    "strings",
+    "regex",
+    "temporal",
+    "dtype-date",
+    "dtype-datetime",
+    "dtype-duration",
+    "list_eval",
+    "list_any_all",
+    "list_count",
+    "list_gather",
+    "concat_str",
+    "is_in",
+    "rows",
+    "fmt",
+    "round_series",
+    "abs",
+    "log",
+    "string_pad",
+    "string_reverse",
+    "dtype-struct",
+    "offset_by",
+    "replace",
+] }
 
 [dev-dependencies]
 insta = "1"
