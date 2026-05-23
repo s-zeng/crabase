@@ -48,6 +48,8 @@ polars = { version = "0.46", default-features = false, features = [
     "offset_by",
     "replace",
 ] }
+toon-format = "0.5.0"
+serde_json = "1"
 
 [dev-dependencies]
 insta = "1"

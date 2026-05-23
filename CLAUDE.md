@@ -100,9 +100,14 @@ src/
                     into a single LazyFrame plus a VaultSchema describing it
   filter.rs       - Compiles a FilterNode tree into a polars `Expr` predicate
   query.rs        - Orchestrator: filter → sort_by_exprs → limit → select → collect
-  output.rs       - DataFrame → CSV writer matching the legacy quoting rules
-                    (Polars's built-in CsvWriter is NOT used; custom row iteration
-                    preserves "5" vs "5.0", list comma-joining, etc.)
+  output.rs       - DataFrame → CSV (`write_csv`) and TOON (`write_toon`) writers.
+                    CSV uses custom row iteration matching the legacy quoting
+                    rules (Polars's built-in CsvWriter is NOT used; preserves
+                    "5" vs "5.0", list comma-joining, etc.). TOON builds a
+                    serde_json::Value array of flat row objects and hands it to
+                    `toon_format::encode_default`; list cells are joined to
+                    strings so the encoder picks the compact tabular header
+                    form `[N]{col1,col2,...}:`.
   expr/
     mod.rs        - Re-exports
     lexer.rs      - Spanned tokenizer for expression language
@@ -128,13 +133,13 @@ tests/
 ## CLI Usage
 
 ```
-crabase base:query file=<path-relative-to-vault> format=csv [vault=<vault_root>] [view=<view_name>]
+crabase base:query file=<path-relative-to-vault> format=csv|toon [vault=<vault_root>] [view=<view_name>]
 ```
 
 - `file=` is the path to the `.base` file, relative to the vault root
 - `vault=` defaults to the current working directory
 - `view=` selects which view; defaults to the first view in the file
-- `format=csv` is the only supported output format
+- `format=csv` (default) and `format=toon` are supported
 
 ## Key Design Decisions
 

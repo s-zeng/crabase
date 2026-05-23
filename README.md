@@ -206,20 +206,24 @@ Supported duration units are:
 
 ### Output behavior
 
-CSV output currently has these semantics:
+Two output formats are supported: `csv` (default) and `toon`
+([TOON](https://github.com/johannschopplich/toon) — Token-Oriented Object
+Notation, designed for efficient LLM ingestion). Both share the same header
+transforms and primitive cell formatting:
 
 - headers come from `properties.<column>.displayName` when present
 - `formula.` is stripped from header names
 - other dotted names are rendered with spaces in headers
 - `title` is rendered as an Obsidian wikilink using the note path and display title
-- list values are flattened as comma-separated cells
-- missing values render as blank CSV cells
+- list values are flattened as comma-separated strings (in TOON too, so the
+  encoder emits the compact tabular `[N]{col1,col2,...}:` header instead of
+  per-row key/value blocks)
+- missing values render as blank cells in CSV and as `null` in TOON
 
 ## Important Limits
 
 The current implementation does not aim for full Obsidian compatibility yet. Known limits include:
 
-- only CSV output is supported
 - query rendering is table-oriented even if other view `type` values are parsed
 - `groupBy` is used for sorting, not grouped output
 - sorting only reads note and `file.*` properties; sort keys on `formula.*` are currently ignored in practice
@@ -232,11 +236,11 @@ The current implementation does not aim for full Obsidian compatibility yet. Kno
 ### `base:query`
 
 ```bash
-crabase base:query file=<path-relative-to-vault> format=csv [vault=<vault_root>] [view=<view_name>]
+crabase base:query file=<path-relative-to-vault> format=csv|toon [vault=<vault_root>] [view=<view_name>]
 ```
 
 - `file=`: path to the `.base` file, relative to the vault root
-- `format=`: must be `csv`
+- `format=`: `csv` (default) or `toon`
 - `vault=`: defaults to the current working directory
 - `view=`: selects a named view; defaults to the first view in the file
 

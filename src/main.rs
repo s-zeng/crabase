@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crabase_lib::base_file::BaseFile;
 use crabase_lib::error::{CrabaseError, Result};
-use crabase_lib::output::write_csv;
+use crabase_lib::output::{write_csv, write_toon};
 use crabase_lib::query::execute_query;
 use crabase_lib::vault::scan_bases;
 
@@ -26,7 +26,7 @@ fn run() -> Result<()> {
     // Expect: crabase <subcommand> <key=value>...
     if raw_args.len() < 2 {
         eprintln!(
-            "Usage: crabase <subcommand> [args]\n  base:query file=<path> format=csv [vault=<vault_root>] [view=<view_name>]\n  base:views file=<path> [vault=<vault_root>]\n  bases [vault=<vault_root>]"
+            "Usage: crabase <subcommand> [args]\n  base:query file=<path> format=csv|toon [vault=<vault_root>] [view=<view_name>]\n  base:views file=<path> [vault=<vault_root>]\n  bases [vault=<vault_root>]"
         );
         return Err(CrabaseError::MissingArg("subcommand".to_string()));
     }
@@ -89,9 +89,9 @@ fn run() -> Result<()> {
         .ok_or_else(|| CrabaseError::MissingArg("file".to_string()))?;
 
     let format = kv_args.get("format").map(String::as_str).unwrap_or("csv");
-    if format != "csv" {
+    if format != "csv" && format != "toon" {
         return Err(CrabaseError::Query(format!(
-            "Unsupported format: {format}. Only 'csv' is supported"
+            "Unsupported format: {format}. Supported formats: csv, toon"
         )));
     }
 
@@ -125,7 +125,11 @@ fn run() -> Result<()> {
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    write_csv(&mut out, &columns, &df, &base_file).map_err(CrabaseError::Io)?;
+    match format {
+        "csv" => write_csv(&mut out, &columns, &df, &base_file).map_err(CrabaseError::Io)?,
+        "toon" => write_toon(&mut out, &columns, &df, &base_file).map_err(CrabaseError::Io)?,
+        _ => unreachable!(),
+    }
 
     Ok(())
 }

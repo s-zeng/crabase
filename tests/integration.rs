@@ -29,6 +29,22 @@ fn run_query(vault: &std::path::Path, base_path: &std::path::Path, view: Option<
     String::from_utf8(out).expect("utf8 output")
 }
 
+fn run_query_toon(
+    vault: &std::path::Path,
+    base_path: &std::path::Path,
+    view: Option<&str>,
+) -> String {
+    use crabase_lib::{base_file::BaseFile, output::write_toon, query::execute_query};
+    let content = std::fs::read_to_string(base_path).expect("read base file");
+    let base_file = BaseFile::parse(&content).expect("parse base file");
+    let view_obj = base_file.get_view(view).expect("get view");
+    let columns = view_obj.order.clone().unwrap_or_default();
+    let df = execute_query(vault, &base_file, view_obj).expect("execute query");
+    let mut out = Vec::new();
+    write_toon(&mut out, &columns, &df, &base_file).expect("write toon");
+    String::from_utf8(out).expect("utf8 output")
+}
+
 /// Evaluate a single expression against a 1-row LazyFrame containing the given
 /// named values. Returns the result rendered with the same display rules used
 /// in the CSV writer.
@@ -217,6 +233,32 @@ fn test_sort_ties_fall_back_to_file_name() {
     let vault = fixtures_vault();
     let base_path = fixtures_base("name_tiebreak.base");
     let output = run_query(&vault, &base_path, None);
+    insta::assert_snapshot!(output);
+}
+
+// ---------- TOON-output snapshot tests ----------
+
+#[test]
+fn test_sermons_query_toon() {
+    let vault = fixtures_vault();
+    let base_path = fixtures_base("test.base");
+    let output = run_query_toon(&vault, &base_path, None);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn test_toon_null_arithmetic_propagates_null() {
+    let vault = fixtures_vault();
+    let base_path = fixtures_base("null_arith.base");
+    let output = run_query_toon(&vault, &base_path, None);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn test_toon_formula_columns_have_stripped_headers() {
+    let vault = fixtures_vault();
+    let base_path = fixtures_base("formula_sort_ignored.base");
+    let output = run_query_toon(&vault, &base_path, None);
     insta::assert_snapshot!(output);
 }
 

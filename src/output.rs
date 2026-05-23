@@ -1,9 +1,11 @@
-//! Convert a `DataFrame` to CSV bytes, applying the same header transforms and
-//! cell formatting as the legacy writer (so snapshots largely survive).
+//! Convert a `DataFrame` to CSV or TOON bytes. Both formats share the same
+//! header transforms and primitive cell formatting; TOON additionally joins
+//! list cells into strings so the encoder picks the compact tabular form.
 
 use std::io::Write;
 
 use polars::prelude::*;
+use serde_json::{Map, Number, Value};
 
 use crate::base_file::BaseFile;
 
@@ -153,5 +155,86 @@ fn format_float(f: f64) -> String {
         format!("{}", f as i64)
     } else {
         format!("{f}")
+    }
+}
+
+/// Write the DataFrame as TOON to `out`. Rows become an array of flat objects
+/// keyed by the same column headers as `write_csv`; list-typed cells are
+/// joined with `", "` so the encoder emits the compact tabular header
+/// `[N]{col1,col2,...}:` rather than per-row key-value blocks.
+pub fn write_toon(
+    out: &mut dyn Write,
+    columns: &[String],
+    df: &DataFrame,
+    base_file: &BaseFile,
+) -> std::io::Result<()> {
+    let series: Vec<&Series> = columns
+        .iter()
+        .map(|name| df.column(name).ok().map(|c| c.as_materialized_series()))
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+
+    if series.len() != columns.len() {
+        return Err(std::io::Error::other(format!(
+            "DataFrame missing one or more requested columns: {columns:?}"
+        )));
+    }
+
+    let headers: Vec<String> = columns.iter().map(|c| header_for(c, base_file)).collect();
+
+    let mut rows: Vec<Value> = Vec::with_capacity(df.height());
+    for row in 0..df.height() {
+        let mut obj = Map::with_capacity(columns.len());
+        for (i, s) in series.iter().enumerate() {
+            let v = s.get(row).ok();
+            let json = match v {
+                Some(av) => any_value_to_json(&av),
+                None => Value::Null,
+            };
+            obj.insert(headers[i].clone(), json);
+        }
+        rows.push(Value::Object(obj));
+    }
+
+    let toon = toon_format::encode_default(&Value::Array(rows))
+        .map_err(|e| std::io::Error::other(format!("toon encode failed: {e}")))?;
+    out.write_all(toon.as_bytes())?;
+    out.write_all(b"\n")?;
+    Ok(())
+}
+
+fn any_value_to_json(v: &AnyValue<'_>) -> Value {
+    match v {
+        AnyValue::Null => Value::Null,
+        AnyValue::Boolean(b) => Value::Bool(*b),
+        AnyValue::String(s) => Value::String(s.to_string()),
+        AnyValue::StringOwned(s) => Value::String(s.to_string()),
+        AnyValue::Int8(n) => Value::Number((*n as i64).into()),
+        AnyValue::Int16(n) => Value::Number((*n as i64).into()),
+        AnyValue::Int32(n) => Value::Number((*n as i64).into()),
+        AnyValue::Int64(n) => Value::Number((*n).into()),
+        AnyValue::UInt8(n) => Value::Number((*n as u64).into()),
+        AnyValue::UInt16(n) => Value::Number((*n as u64).into()),
+        AnyValue::UInt32(n) => Value::Number((*n as u64).into()),
+        AnyValue::UInt64(n) => Value::Number((*n).into()),
+        AnyValue::Float32(f) => float_to_json(*f as f64),
+        AnyValue::Float64(f) => float_to_json(*f),
+        AnyValue::Date(_) | AnyValue::Datetime(_, _, _) | AnyValue::DatetimeOwned(_, _, _) => {
+            Value::String(format_any(v))
+        }
+        AnyValue::Duration(ms, _) => Value::Number((*ms).into()),
+        AnyValue::List(series) => Value::String(series_to_csv_list(series)),
+        other => Value::String(format!("{other}")),
+    }
+}
+
+fn float_to_json(f: f64) -> Value {
+    if f.is_nan() {
+        return Value::Null;
+    }
+    if f.fract() == 0.0 && f.abs() < 1e15 {
+        Value::Number((f as i64).into())
+    } else {
+        Number::from_f64(f).map(Value::Number).unwrap_or(Value::Null)
     }
 }
