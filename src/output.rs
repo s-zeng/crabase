@@ -235,6 +235,8 @@ fn float_to_json(f: f64) -> Value {
     if f.fract() == 0.0 && f.abs() < 1e15 {
         Value::Number((f as i64).into())
     } else {
-        Number::from_f64(f).map(Value::Number).unwrap_or(Value::Null)
+        Number::from_f64(f)
+            .map(Value::Number)
+            .unwrap_or(Value::Null)
     }
 }

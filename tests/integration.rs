@@ -95,7 +95,8 @@ fn eval_expr_with_formulas(
     let mut columns: Vec<Column> = Vec::new();
     let mut frontmatter_keys: HashMap<String, String> = HashMap::new();
     for (name, val) in inputs {
-        let series = Series::from_any_values(name.into(), &[val], true).map_err(|e| e.to_string())?;
+        let series =
+            Series::from_any_values(name.into(), &[val], true).map_err(|e| e.to_string())?;
         columns.push(series.into_column());
         frontmatter_keys.insert(name.to_string(), name.to_string());
     }
@@ -318,7 +319,11 @@ fn test_filter_node_and() {
     let pred = filter_node_to_expr(&node, &ctx).expect("compile");
     let df = lf
         .filter(pred)
-        .filter(col("file_name").str().contains_literal(lit("House of Blood")))
+        .filter(
+            col("file_name")
+                .str()
+                .contains_literal(lit("House of Blood")),
+        )
         .collect()
         .expect("collect");
     let count = df.height();
@@ -331,7 +336,11 @@ fn test_file_name_no_extension() {
     let vault = fixtures_vault();
     let (lf, _) = scan_vault_to_lazyframe(&vault).expect("scan");
     let df = lf
-        .filter(col("file_name").str().contains_literal(lit("House of Blood")))
+        .filter(
+            col("file_name")
+                .str()
+                .contains_literal(lit("House of Blood")),
+        )
         .select([col("file_name")])
         .collect()
         .expect("collect");

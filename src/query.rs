@@ -15,11 +15,7 @@ use crate::vault::{VaultSchema, scan_vault_to_lazyframe};
 
 /// Execute a query against the vault for a given view, returning the result as
 /// a polars `DataFrame`. Column order matches `view.order`.
-pub fn execute_query(
-    vault_root: &Path,
-    base_file: &BaseFile,
-    view: &View,
-) -> Result<DataFrame> {
+pub fn execute_query(vault_root: &Path, base_file: &BaseFile, view: &View) -> Result<DataFrame> {
     let (mut lf, schema) = scan_vault_to_lazyframe(vault_root)?;
     let ctx = TranslateCtx::new(&schema, &base_file.formulas);
 
@@ -110,11 +106,7 @@ fn property_to_expr(prop: &str, ctx: &TranslateCtx, schema: &VaultSchema) -> Res
 
 /// Build the `select` expressions, one per `view.order` column, applying the
 /// `title` special case and the rename to the output header.
-fn column_select_exprs(
-    view: &View,
-    ctx: &TranslateCtx,
-    schema: &VaultSchema,
-) -> Result<Vec<Expr>> {
+fn column_select_exprs(view: &View, ctx: &TranslateCtx, schema: &VaultSchema) -> Result<Vec<Expr>> {
     let order = view.order.clone().unwrap_or_default();
     order
         .iter()

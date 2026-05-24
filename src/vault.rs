@@ -219,7 +219,9 @@ fn extract_frontmatter_tags(frontmatter: &BTreeMap<String, serde_yaml::Value>) -
 }
 
 fn extract_inline_tags(body: &str) -> Vec<String> {
-    body.lines().flat_map(extract_inline_tags_from_line).collect()
+    body.lines()
+        .flat_map(extract_inline_tags_from_line)
+        .collect()
 }
 
 fn extract_inline_tags_from_line(line: &str) -> Vec<String> {
@@ -341,11 +343,7 @@ fn build_dataframe(raw_files: Vec<RawFile>) -> Result<(DataFrame, VaultSchema)> 
         }
         let values: Vec<&serde_yaml::Value> = raw_files
             .iter()
-            .map(|f| {
-                f.frontmatter
-                    .get(key)
-                    .unwrap_or(&serde_yaml::Value::Null)
-            })
+            .map(|f| f.frontmatter.get(key).unwrap_or(&serde_yaml::Value::Null))
             .collect();
         let dtype = infer_dtype(&values);
         let column = build_frontmatter_column(&column_name, &values, &dtype)?;
@@ -454,7 +452,14 @@ fn infer_dtype(values: &[&serde_yaml::Value]) -> DataType {
     }
     let only =
         |a: bool, b: bool, c: bool, d: bool, e: bool, f: bool| a && !b && !c && !d && !e && !f;
-    if only(has_int, has_float, has_bool, has_date, has_datetime, has_list || has_string) {
+    if only(
+        has_int,
+        has_float,
+        has_bool,
+        has_date,
+        has_datetime,
+        has_list || has_string,
+    ) {
         DataType::Int64
     } else if !has_bool
         && !has_date
@@ -464,18 +469,38 @@ fn infer_dtype(values: &[&serde_yaml::Value]) -> DataType {
         && (has_int || has_float)
     {
         DataType::Float64
-    } else if only(has_bool, has_int, has_float, has_date, has_datetime, has_list || has_string) {
+    } else if only(
+        has_bool,
+        has_int,
+        has_float,
+        has_date,
+        has_datetime,
+        has_list || has_string,
+    ) {
         DataType::Boolean
     } else if !has_int && !has_float && !has_bool && !has_list && !has_string && has_datetime {
         DataType::Datetime(TimeUnit::Microseconds, None)
-    } else if !has_int && !has_float && !has_bool && !has_list && !has_string && (has_date || has_datetime) {
+    } else if !has_int
+        && !has_float
+        && !has_bool
+        && !has_list
+        && !has_string
+        && (has_date || has_datetime)
+    {
         // Mix of date + datetime → promote to Datetime for uniform storage
         if has_datetime {
             DataType::Datetime(TimeUnit::Microseconds, None)
         } else {
             DataType::Date
         }
-    } else if only(has_list, has_int, has_float, has_bool, has_date, has_datetime || has_string) {
+    } else if only(
+        has_list,
+        has_int,
+        has_float,
+        has_bool,
+        has_date,
+        has_datetime || has_string,
+    ) {
         DataType::List(Box::new(DataType::String))
     } else {
         DataType::String
@@ -505,7 +530,11 @@ fn build_frontmatter_column(
         DataType::Date => {
             let xs: Vec<Option<i32>> = values
                 .iter()
-                .map(|v| value_as_date(v).map(|d| (d - NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days() as i32))
+                .map(|v| {
+                    value_as_date(v).map(|d| {
+                        (d - NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days() as i32
+                    })
+                })
                 .collect();
             let s = Series::new(name.into(), xs);
             let s = s.cast(&DataType::Date)?;
@@ -524,10 +553,9 @@ fn build_frontmatter_column(
             let mut series_vec: Vec<Series> = Vec::with_capacity(values.len());
             for v in values {
                 let items: Vec<String> = match v {
-                    serde_yaml::Value::Sequence(seq) => seq
-                        .iter()
-                        .map(yaml_value_to_string_cell)
-                        .collect(),
+                    serde_yaml::Value::Sequence(seq) => {
+                        seq.iter().map(yaml_value_to_string_cell).collect()
+                    }
                     serde_yaml::Value::Null => Vec::new(),
                     other => vec![yaml_value_to_string_cell(other)],
                 };
@@ -536,8 +564,7 @@ fn build_frontmatter_column(
             list_string_column(name, series_vec)
         }
         DataType::String => {
-            let xs: Vec<Option<String>> =
-                values.iter().map(|v| value_as_string_cell(v)).collect();
+            let xs: Vec<Option<String>> = values.iter().map(|v| value_as_string_cell(v)).collect();
             Ok(Column::new(name.into(), xs))
         }
         other => Err(CrabaseError::Query(format!(
@@ -629,4 +656,3 @@ fn value_as_string_cell(v: &serde_yaml::Value) -> Option<String> {
         other => Some(yaml_value_to_string_cell(other)),
     }
 }
-
