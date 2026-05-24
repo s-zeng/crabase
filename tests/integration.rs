@@ -245,6 +245,14 @@ fn test_is_empty_includes_null_cells() {
     insta::assert_snapshot!(output);
 }
 
+#[test]
+fn test_neq_literal_includes_null_cells() {
+    let vault = fixtures_vault();
+    let base_path = fixtures_base("neq_null.base");
+    let output = run_query(&vault, &base_path, None);
+    insta::assert_snapshot!(output);
+}
+
 // ---------- TOON-output snapshot tests ----------
 
 #[test]

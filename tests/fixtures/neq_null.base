@@ -1,0 +1,12 @@
+filters:
+  and:
+    - file.folder == "NeqNull"
+    - wontDo != true
+views:
+  - type: table
+    name: "NotTrue"
+    order:
+      - file.name
+    sort:
+      - property: file.name
+        direction: ASC

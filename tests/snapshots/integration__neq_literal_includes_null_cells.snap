@@ -1,0 +1,8 @@
+---
+source: tests/integration.rs
+expression: output
+---
+file name
+False
+Missing
+Null

@@ -971,10 +971,13 @@ fn translate_eq(l: Translated, r: Translated, neg: bool) -> Result<Translated> {
         ));
     }
     let (l_expr, r_expr) = cast_for_comparison(l, r);
+    // Obsidian semantics: null is treated as "not equal" to any concrete value.
+    // Polars returns null when either side is null, so fill_null with the
+    // outcome that says "this row's value isn't the one you're asking about".
     let expr = if neg {
-        l_expr.neq(r_expr)
+        l_expr.neq(r_expr).fill_null(lit(true))
     } else {
-        l_expr.eq(r_expr)
+        l_expr.eq(r_expr).fill_null(lit(false))
     };
     Ok(Translated::new(expr, InferredType::Bool))
 }
