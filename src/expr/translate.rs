@@ -312,9 +312,10 @@ fn translate_array(items: &[AstExpr], ctx: &TranslateCtx) -> Result<Translated> 
     if items.is_empty() {
         // empty list of strings as a safe default
         return Ok(Translated::new(
-            lit(LiteralValue::Series(SpecialEq::new(
-                Series::new("".into(), Vec::<String>::new()),
-            )))
+            lit(LiteralValue::Series(SpecialEq::new(Series::new(
+                "".into(),
+                Vec::<String>::new(),
+            ))))
             .list()
             .gather(lit(0i64), true)
             .head(Some(0)),
@@ -326,10 +327,7 @@ fn translate_array(items: &[AstExpr], ctx: &TranslateCtx) -> Result<Translated> 
         .map(|i| translate_inner(i, ctx))
         .collect::<Result<Vec<_>>>()?;
     let exprs: Vec<Expr> = translated.into_iter().map(|t| t.expr).collect();
-    Ok(Translated::new(
-        concat_list(exprs)?,
-        InferredType::List,
-    ))
+    Ok(Translated::new(concat_list(exprs)?, InferredType::List))
 }
 
 // ---------- Call (function or method) ----------
@@ -346,11 +344,7 @@ fn translate_call(callee: &AstExpr, args: &[AstExpr], ctx: &TranslateCtx) -> Res
     }
 }
 
-fn translate_function_call(
-    name: &str,
-    args: &[AstExpr],
-    ctx: &TranslateCtx,
-) -> Result<Translated> {
+fn translate_function_call(name: &str, args: &[AstExpr], ctx: &TranslateCtx) -> Result<Translated> {
     match name {
         "if" => {
             let cond = translate_inner(&args[0], ctx)?;
@@ -384,11 +378,17 @@ fn translate_function_call(
         }
         "min" => {
             let exprs = translate_args(args, ctx)?;
-            Ok(Translated::new(fold_min_max(exprs, true), InferredType::Float))
+            Ok(Translated::new(
+                fold_min_max(exprs, true),
+                InferredType::Float,
+            ))
         }
         "max" => {
             let exprs = translate_args(args, ctx)?;
-            Ok(Translated::new(fold_min_max(exprs, false), InferredType::Float))
+            Ok(Translated::new(
+                fold_min_max(exprs, false),
+                InferredType::Float,
+            ))
         }
         "date" => translate_date_fn(args, ctx),
         "today" => {
@@ -407,13 +407,7 @@ fn translate_function_call(
             if let Some(display_arg) = args.get(1) {
                 let display = translate_inner(display_arg, ctx)?;
                 Ok(Translated::new(
-                    concat_string_exprs(&[
-                        lit("[["),
-                        path.expr,
-                        lit("|"),
-                        display.expr,
-                        lit("]]"),
-                    ]),
+                    concat_string_exprs(&[lit("[["), path.expr, lit("|"), display.expr, lit("]]")]),
                     InferredType::String,
                 ))
             } else {
@@ -480,10 +474,16 @@ fn translate_date_fn(args: &[AstExpr], ctx: &TranslateCtx) -> Result<Translated>
     if let ExprKind::Literal(Literal::Str(s)) = &first.kind {
         let stripped = strip_wikilink(s);
         if let Ok(dt) = NaiveDateTime::parse_from_str(stripped, "%Y-%m-%d %H:%M:%S") {
-            return Ok(Translated::new(datetime_literal(dt), InferredType::Datetime));
+            return Ok(Translated::new(
+                datetime_literal(dt),
+                InferredType::Datetime,
+            ));
         }
         if let Ok(dt) = NaiveDateTime::parse_from_str(stripped, "%Y-%m-%dT%H:%M:%S") {
-            return Ok(Translated::new(datetime_literal(dt), InferredType::Datetime));
+            return Ok(Translated::new(
+                datetime_literal(dt),
+                InferredType::Datetime,
+            ));
         }
         if let Ok(d) = NaiveDate::parse_from_str(stripped, "%Y-%m-%d") {
             return Ok(Translated::new(date_literal(d), InferredType::Date));
@@ -600,11 +600,7 @@ fn apply_method(
     }
 }
 
-fn apply_string_method(
-    recv: Translated,
-    method: &str,
-    args: &[Expr],
-) -> Result<Translated> {
+fn apply_string_method(recv: Translated, method: &str, args: &[Expr]) -> Result<Translated> {
     match method {
         "lower" => Ok(Translated::new(
             recv.expr.str().to_lowercase(),
@@ -656,20 +652,13 @@ fn apply_string_method(
     }
 }
 
-fn apply_number_method(
-    recv: Translated,
-    method: &str,
-    args: &[Expr],
-) -> Result<Translated> {
+fn apply_number_method(recv: Translated, method: &str, args: &[Expr]) -> Result<Translated> {
     match method {
         "abs" => Ok(Translated::new(recv.expr.abs(), recv.ty)),
         "ceil" => Ok(Translated::new(recv.expr.ceil(), recv.ty)),
         "floor" => Ok(Translated::new(recv.expr.floor(), recv.ty)),
         "round" => {
-            let digits = args
-                .first()
-                .cloned()
-                .unwrap_or(lit(0i64));
+            let digits = args.first().cloned().unwrap_or(lit(0i64));
             Ok(Translated::new(
                 recv.expr.round(digits_to_u32(digits)),
                 recv.ty,
@@ -693,11 +682,7 @@ fn apply_bool_method(_recv: Translated, method: &str) -> Result<Translated> {
     }
 }
 
-fn apply_list_method(
-    recv: Translated,
-    method: &str,
-    args: &[Expr],
-) -> Result<Translated> {
+fn apply_list_method(recv: Translated, method: &str, args: &[Expr]) -> Result<Translated> {
     match method {
         "contains" => Ok(Translated::new(
             recv.expr.list().contains(args[0].clone()),
@@ -770,11 +755,7 @@ fn apply_date_method(
 
 // ---------- file.X(...) methods ----------
 
-fn translate_file_method(
-    method: &str,
-    args: &[AstExpr],
-    ctx: &TranslateCtx,
-) -> Result<Translated> {
+fn translate_file_method(method: &str, args: &[AstExpr], ctx: &TranslateCtx) -> Result<Translated> {
     match method {
         "inFolder" => {
             let folder = string_literal_arg(args, 0)?;
@@ -782,7 +763,9 @@ fn translate_file_method(
             Ok(Translated::new(
                 col("file_folder")
                     .eq(lit(folder.clone()))
-                    .or(col("file_folder").str().starts_with(lit(with_slash.clone())))
+                    .or(col("file_folder")
+                        .str()
+                        .starts_with(lit(with_slash.clone())))
                     .or(col("file_path").str().starts_with(lit(with_slash))),
                 InferredType::Bool,
             ))
@@ -797,7 +780,9 @@ fn translate_file_method(
             for needle in &needles {
                 let prefix = format!("{needle}/");
                 let elem = col("");
-                let one = elem.clone().eq(lit(needle.clone()))
+                let one = elem
+                    .clone()
+                    .eq(lit(needle.clone()))
                     .or(elem.str().starts_with(lit(prefix)));
                 predicate = predicate.or(one);
             }
@@ -822,7 +807,9 @@ fn translate_file_method(
                 let md = format!("{needle}.md");
                 let with_slash_md = format!("/{needle}.md");
                 let elem = col("");
-                let one = elem.clone().eq(lit(needle.clone()))
+                let one = elem
+                    .clone()
+                    .eq(lit(needle.clone()))
                     .or(elem.clone().str().ends_with(lit(with_slash)))
                     .or(elem.clone().eq(lit(md)))
                     .or(elem.str().ends_with(lit(with_slash_md)));
@@ -846,10 +833,7 @@ fn translate_file_method(
                 .map(str::to_string)
                 .filter(|n| ctx.schema.has_column(n));
             match resolved {
-                Some(name) => Ok(Translated::new(
-                    col(name).is_not_null(),
-                    InferredType::Bool,
-                )),
+                Some(name) => Ok(Translated::new(col(name).is_not_null(), InferredType::Bool)),
                 None => Ok(Translated::new(lit(false), InferredType::Bool)),
             }
         }
@@ -909,10 +893,7 @@ fn translate_binary(
             truthy(l).and(truthy(r)),
             InferredType::Bool,
         )),
-        BinOp::Or => Ok(Translated::new(
-            truthy(l).or(truthy(r)),
-            InferredType::Bool,
-        )),
+        BinOp::Or => Ok(Translated::new(truthy(l).or(truthy(r)), InferredType::Bool)),
     }
 }
 
@@ -920,19 +901,13 @@ fn translate_add(l: Translated, r: Translated) -> Result<Translated> {
     // Date + duration string
     if l.ty.is_date_or_datetime() {
         if let Some(dur) = duration_from_expr(&r.expr, &r.ty) {
-            return Ok(Translated::new(
-                l.expr.dt().offset_by(lit(dur)),
-                l.ty,
-            ));
+            return Ok(Translated::new(l.expr.dt().offset_by(lit(dur)), l.ty));
         }
     }
     // String concatenation (any side string-typed)
     if matches!(l.ty, InferredType::String) || matches!(r.ty, InferredType::String) {
         return Ok(Translated::new(
-            concat_string_exprs(&[
-                l.expr.cast(DataType::String),
-                r.expr.cast(DataType::String),
-            ]),
+            concat_string_exprs(&[l.expr.cast(DataType::String), r.expr.cast(DataType::String)]),
             InferredType::String,
         ));
     }
@@ -980,13 +955,21 @@ fn translate_eq(l: Translated, r: Translated, neg: bool) -> Result<Translated> {
     // expression language treats null comparison as a definite is_null / is_not_null.
     if matches!(r.ty, InferredType::Null) {
         return Ok(Translated::new(
-            if neg { l.expr.is_not_null() } else { l.expr.is_null() },
+            if neg {
+                l.expr.is_not_null()
+            } else {
+                l.expr.is_null()
+            },
             InferredType::Bool,
         ));
     }
     if matches!(l.ty, InferredType::Null) {
         return Ok(Translated::new(
-            if neg { r.expr.is_not_null() } else { r.expr.is_null() },
+            if neg {
+                r.expr.is_not_null()
+            } else {
+                r.expr.is_null()
+            },
             InferredType::Bool,
         ));
     }
@@ -1015,13 +998,18 @@ fn cast_for_comparison(l: Translated, r: Translated) -> (Expr, Expr) {
     }
     // Numeric cross-type: cast to Float64.
     if l.ty.is_numeric() && r.ty.is_numeric() {
-        return (l.expr.cast(DataType::Float64), r.expr.cast(DataType::Float64));
+        return (
+            l.expr.cast(DataType::Float64),
+            r.expr.cast(DataType::Float64),
+        );
     }
     // Date vs Datetime: cast Date to Datetime
     if l.ty.is_date_or_datetime() && r.ty.is_date_or_datetime() {
         return (
-            l.expr.cast(DataType::Datetime(TimeUnit::Microseconds, None)),
-            r.expr.cast(DataType::Datetime(TimeUnit::Microseconds, None)),
+            l.expr
+                .cast(DataType::Datetime(TimeUnit::Microseconds, None)),
+            r.expr
+                .cast(DataType::Datetime(TimeUnit::Microseconds, None)),
         );
     }
     // Default: cast both to String.
@@ -1045,14 +1033,14 @@ fn translate_unary(op: &UnaryOp, operand: &AstExpr, ctx: &TranslateCtx) -> Resul
 pub fn truthy(t: Translated) -> Expr {
     match t.ty {
         InferredType::Bool => t.expr.fill_null(lit(false)),
-        InferredType::Int | InferredType::Float => {
-            t.expr.cast(DataType::Float64).neq(lit(0.0)).fill_null(lit(false))
-        }
+        InferredType::Int | InferredType::Float => t
+            .expr
+            .cast(DataType::Float64)
+            .neq(lit(0.0))
+            .fill_null(lit(false)),
         InferredType::String => t.expr.str().len_chars().gt(lit(0u32)).fill_null(lit(false)),
         InferredType::List => t.expr.list().len().gt(lit(0u32)).fill_null(lit(false)),
-        InferredType::Date | InferredType::Datetime => {
-            t.expr.is_not_null()
-        }
+        InferredType::Date | InferredType::Datetime => t.expr.is_not_null(),
         InferredType::Null => lit(false),
         InferredType::Duration => t.expr.is_not_null(),
         InferredType::Unknown => {
@@ -1169,4 +1157,3 @@ pub fn moment_to_chrono(fmt: &str) -> String {
         .replace("mm", "%M")
         .replace("ss", "%S")
 }
-
