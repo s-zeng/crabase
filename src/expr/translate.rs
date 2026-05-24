@@ -563,6 +563,19 @@ fn apply_method(
                 InferredType::String,
             ));
         }
+        // isEmpty has uniform null-handling across all types: null is empty.
+        // String/List additionally check zero length. This matches Obsidian
+        // Bases semantics where a missing/null property is considered empty.
+        "isEmpty" => {
+            let null_check = recv.expr.clone().is_null();
+            let expr = match &recv.ty {
+                InferredType::String => null_check.or(recv.expr.str().len_chars().eq(lit(0u32))),
+                InferredType::List => null_check.or(recv.expr.list().len().eq(lit(0u32))),
+                InferredType::Null => lit(true),
+                _ => null_check,
+            };
+            return Ok(Translated::new(expr, InferredType::Bool));
+        }
         "isType" => {
             let target = string_literal_arg(raw_args, 0)?;
             let actual = match recv.ty {
@@ -592,10 +605,7 @@ fn apply_method(
         InferredType::Date | InferredType::Datetime => {
             apply_date_method(recv, method, raw_args, arg_exprs, ctx)
         }
-        InferredType::Null => match method {
-            "isEmpty" => Ok(Translated::new(lit(true), InferredType::Bool)),
-            _ => Ok(Translated::new(lit(NULL), InferredType::Null)),
-        },
+        InferredType::Null => Ok(Translated::new(lit(NULL), InferredType::Null)),
         _ => Ok(Translated::new(lit(NULL), InferredType::Null)),
     }
 }
@@ -630,10 +640,6 @@ fn apply_string_method(recv: Translated, method: &str, args: &[Expr]) -> Result<
             recv.expr.str().ends_with(args[0].clone()),
             InferredType::Bool,
         )),
-        "isEmpty" => Ok(Translated::new(
-            recv.expr.str().len_chars().eq(lit(0u32)),
-            InferredType::Bool,
-        )),
         "length" => Ok(Translated::new(
             recv.expr.str().len_chars().cast(DataType::Int64),
             InferredType::Int,
@@ -664,7 +670,6 @@ fn apply_number_method(recv: Translated, method: &str, args: &[Expr]) -> Result<
                 recv.ty,
             ))
         }
-        "isEmpty" => Ok(Translated::new(lit(false), InferredType::Bool)),
         _ => Ok(Translated::new(lit(NULL), InferredType::Null)),
     }
 }
@@ -675,11 +680,8 @@ fn digits_to_u32(_e: Expr) -> u32 {
     0
 }
 
-fn apply_bool_method(_recv: Translated, method: &str) -> Result<Translated> {
-    match method {
-        "isEmpty" => Ok(Translated::new(lit(false), InferredType::Bool)),
-        _ => Ok(Translated::new(lit(NULL), InferredType::Null)),
-    }
+fn apply_bool_method(_recv: Translated, _method: &str) -> Result<Translated> {
+    Ok(Translated::new(lit(NULL), InferredType::Null))
 }
 
 fn apply_list_method(recv: Translated, method: &str, args: &[Expr]) -> Result<Translated> {
@@ -691,10 +693,6 @@ fn apply_list_method(recv: Translated, method: &str, args: &[Expr]) -> Result<Tr
         "length" => Ok(Translated::new(
             recv.expr.list().len().cast(DataType::Int64),
             InferredType::Int,
-        )),
-        "isEmpty" => Ok(Translated::new(
-            recv.expr.list().len().eq(lit(0u32)),
-            InferredType::Bool,
         )),
         "join" => Ok(Translated::new(
             recv.expr
@@ -748,7 +746,6 @@ fn apply_date_method(
             recv.expr.dt().to_string("%H:%M:%S"),
             InferredType::String,
         )),
-        "isEmpty" => Ok(Translated::new(lit(false), InferredType::Bool)),
         _ => Ok(Translated::new(lit(NULL), InferredType::Null)),
     }
 }

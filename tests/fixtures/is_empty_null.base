@@ -1,0 +1,12 @@
+filters:
+  and:
+    - file.folder == "IsEmpty"
+    - completionDate.isEmpty()
+views:
+  - type: table
+    name: "Empty"
+    order:
+      - file.name
+    sort:
+      - property: file.name
+        direction: ASC

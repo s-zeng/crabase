@@ -237,6 +237,14 @@ fn test_sort_ties_fall_back_to_file_name() {
     insta::assert_snapshot!(output);
 }
 
+#[test]
+fn test_is_empty_includes_null_cells() {
+    let vault = fixtures_vault();
+    let base_path = fixtures_base("is_empty_null.base");
+    let output = run_query(&vault, &base_path, None);
+    insta::assert_snapshot!(output);
+}
+
 // ---------- TOON-output snapshot tests ----------
 
 #[test]
