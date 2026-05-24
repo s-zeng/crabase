@@ -68,6 +68,7 @@ fn eval_expr_with_inputs(expr_str: &str, inputs: Vec<(&str, AnyValue<'static>)>)
     let schema = VaultSchema {
         schema: schema_ref,
         frontmatter_keys,
+        df: std::sync::Arc::new(df.clone()),
     };
     let formulas: HashMap<String, String> = HashMap::new();
     let ctx = TranslateCtx::new(&schema, &formulas);
@@ -108,6 +109,7 @@ fn eval_expr_with_formulas(
     let schema = VaultSchema {
         schema: schema_ref,
         frontmatter_keys,
+        df: std::sync::Arc::new(df.clone()),
     };
     let formulas: HashMap<String, String> = formulas_vec
         .into_iter()

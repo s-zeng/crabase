@@ -10,7 +10,8 @@ use serde_json::{Map, Number, Value};
 use crate::base_file::BaseFile;
 
 /// Header transformation: `displayName` override, strip `formula.` prefix,
-/// replace `.` with space (so `file.name` becomes `file name`).
+/// alias well-known `file.*` columns to Obsidian's friendly names, then fall
+/// back to replacing `.` with space.
 fn header_for(col: &str, base_file: &BaseFile) -> String {
     if let Some(prop) = base_file.properties.get(col) {
         if let Some(display) = &prop.display_name {
@@ -19,6 +20,17 @@ fn header_for(col: &str, base_file: &BaseFile) -> String {
     }
     if let Some(name) = col.strip_prefix("formula.") {
         return name.to_string();
+    }
+    match col {
+        "file.mtime" => return "modified time".to_string(),
+        "file.ctime" => return "created time".to_string(),
+        "file.folder" => return "folder".to_string(),
+        "file.ext" => return "file extension".to_string(),
+        "file.size" => return "file size".to_string(),
+        "file.path" => return "file path".to_string(),
+        "file.tags" => return "tags".to_string(),
+        "file.links" => return "links".to_string(),
+        _ => {}
     }
     col.replace('.', " ")
 }
@@ -72,12 +84,14 @@ pub fn write_csv(
         )));
     }
 
+    let column_is_tags: Vec<bool> = columns.iter().map(|c| is_tag_column(c)).collect();
+
     for row in 0..df.height() {
         for (i, s) in series.iter().enumerate() {
             if i > 0 {
                 write!(out, ",")?;
             }
-            let cell = format_cell(s, row);
+            let cell = format_cell(s, row, column_is_tags[i]);
             write_field(out, &cell)?;
         }
         writeln!(out)?;
@@ -85,14 +99,22 @@ pub fn write_csv(
     Ok(())
 }
 
-fn format_cell(s: &Series, row: usize) -> String {
+/// True when this column should render list elements with a leading `#` —
+/// i.e. it sources from the reserved `file.tags` list. Frontmatter `tags:` is
+/// commonly aliased through to the same data, so a column whose underlying
+/// dataframe series is named `file_tags` qualifies too.
+fn is_tag_column(col: &str) -> bool {
+    matches!(col, "file.tags" | "tags")
+}
+
+fn format_cell(s: &Series, row: usize, tag_list: bool) -> String {
     let Ok(v) = s.get(row) else {
         return String::new();
     };
-    format_any(&v)
+    format_any(&v, tag_list)
 }
 
-fn format_any(v: &AnyValue<'_>) -> String {
+fn format_any(v: &AnyValue<'_>, tag_list: bool) -> String {
     match v {
         AnyValue::Null => String::new(),
         AnyValue::Boolean(b) => b.to_string(),
@@ -127,22 +149,34 @@ fn format_any(v: &AnyValue<'_>) -> String {
                 TimeUnit::Milliseconds => ((micros % 1_000) * 1_000_000) as u32,
             };
             match chrono::DateTime::from_timestamp(secs, nsec) {
-                Some(dt) => dt.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string(),
+                Some(dt) => dt.naive_utc().format("%Y-%m-%dT%H:%M:%S").to_string(),
                 None => String::new(),
             }
         }
         AnyValue::DatetimeOwned(micros, tu, _) => {
-            format_any(&AnyValue::Datetime(*micros, *tu, None))
+            format_any(&AnyValue::Datetime(*micros, *tu, None), tag_list)
         }
         AnyValue::Duration(ms, _) => ms.to_string(),
-        AnyValue::List(series) => series_to_csv_list(series),
+        AnyValue::List(series) => series_to_csv_list(series, tag_list),
         other => format!("{other}"),
     }
 }
 
-fn series_to_csv_list(series: &Series) -> String {
+fn series_to_csv_list(series: &Series, tag_list: bool) -> String {
     let parts: Vec<String> = (0..series.len())
-        .map(|i| series.get(i).map(|av| format_any(&av)).unwrap_or_default())
+        .map(|i| {
+            series
+                .get(i)
+                .map(|av| {
+                    let s = format_any(&av, false);
+                    if tag_list && !s.is_empty() && !s.starts_with('#') {
+                        format!("#{s}")
+                    } else {
+                        s
+                    }
+                })
+                .unwrap_or_default()
+        })
         .collect();
     parts.join(", ")
 }
@@ -181,6 +215,7 @@ pub fn write_toon(
     }
 
     let headers: Vec<String> = columns.iter().map(|c| header_for(c, base_file)).collect();
+    let column_is_tags: Vec<bool> = columns.iter().map(|c| is_tag_column(c)).collect();
 
     let mut rows: Vec<Value> = Vec::with_capacity(df.height());
     for row in 0..df.height() {
@@ -188,7 +223,7 @@ pub fn write_toon(
         for (i, s) in series.iter().enumerate() {
             let v = s.get(row).ok();
             let json = match v {
-                Some(av) => any_value_to_json(&av),
+                Some(av) => any_value_to_json(&av, column_is_tags[i]),
                 None => Value::Null,
             };
             obj.insert(headers[i].clone(), json);
@@ -203,7 +238,7 @@ pub fn write_toon(
     Ok(())
 }
 
-fn any_value_to_json(v: &AnyValue<'_>) -> Value {
+fn any_value_to_json(v: &AnyValue<'_>, tag_list: bool) -> Value {
     match v {
         AnyValue::Null => Value::Null,
         AnyValue::Boolean(b) => Value::Bool(*b),
@@ -220,10 +255,10 @@ fn any_value_to_json(v: &AnyValue<'_>) -> Value {
         AnyValue::Float32(f) => float_to_json(*f as f64),
         AnyValue::Float64(f) => float_to_json(*f),
         AnyValue::Date(_) | AnyValue::Datetime(_, _, _) | AnyValue::DatetimeOwned(_, _, _) => {
-            Value::String(format_any(v))
+            Value::String(format_any(v, false))
         }
         AnyValue::Duration(ms, _) => Value::Number((*ms).into()),
-        AnyValue::List(series) => Value::String(series_to_csv_list(series)),
+        AnyValue::List(series) => Value::String(series_to_csv_list(series, tag_list)),
         other => Value::String(format!("{other}")),
     }
 }

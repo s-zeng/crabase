@@ -11,6 +11,10 @@ pub struct Token {
 pub enum TokenKind {
     Number(f64),
     Str(String),
+    /// A `/pattern/[flags]` regex literal. The expression language uses these
+    /// in `replace()` calls (e.g. `replace(/\d+/, "")`). Flags are ignored —
+    /// callers downstream only consume the pattern.
+    Regex(String),
     Bool(bool),
     Null,
     Ident(Ident),
@@ -40,11 +44,80 @@ pub enum TokenKind {
 pub struct Lexer<'a> {
     input: &'a str,
     pos: usize,
+    /// Tracks the most recently emitted non-whitespace token kind. Used to
+    /// decide whether a `/` starts a regex literal (true after operators, `(`,
+    /// `[`, `,`, or at the start of input) or is a plain division operator
+    /// (true after an identifier, number, `)`, `]`).
+    prev_kind: Option<TokenKind>,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
-        Self { input, pos: 0 }
+        Self {
+            input,
+            pos: 0,
+            prev_kind: None,
+        }
+    }
+
+    /// Decide whether a `/` at the current position should be parsed as the
+    /// start of a regex literal. Mirrors the lookbehind rule JavaScript uses
+    /// for the same syntactic ambiguity.
+    fn slash_starts_regex(&self) -> bool {
+        match &self.prev_kind {
+            None => true,
+            Some(kind) => matches!(
+                kind,
+                TokenKind::LParen
+                    | TokenKind::LBracket
+                    | TokenKind::Comma
+                    | TokenKind::Plus
+                    | TokenKind::Minus
+                    | TokenKind::Star
+                    | TokenKind::Slash
+                    | TokenKind::Percent
+                    | TokenKind::EqEq
+                    | TokenKind::BangEq
+                    | TokenKind::Gt
+                    | TokenKind::Lt
+                    | TokenKind::GtEq
+                    | TokenKind::LtEq
+                    | TokenKind::AmpAmp
+                    | TokenKind::PipePipe
+                    | TokenKind::Bang
+            ),
+        }
+    }
+
+    fn read_regex(&mut self, start: usize) -> Result<Token> {
+        let mut pattern = String::new();
+        loop {
+            match self.advance() {
+                None => {
+                    return Err(CrabaseError::ExprParse(format!(
+                        "Unterminated regex literal at {start}"
+                    )));
+                }
+                Some('\\') => {
+                    pattern.push('\\');
+                    if let Some(next) = self.advance() {
+                        pattern.push(next);
+                    }
+                }
+                Some('/') => {
+                    // Consume optional flags (e.g. /pat/gi) and discard.
+                    while let Some(c) = self.peek_char() {
+                        if c.is_ascii_alphabetic() {
+                            let _ = self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    return Ok(self.token(start, TokenKind::Regex(pattern)));
+                }
+                Some(c) => pattern.push(c),
+            }
+        }
     }
 
     fn peek_char(&self) -> Option<char> {
@@ -170,7 +243,13 @@ impl<'a> Lexer<'a> {
                     '+' => Ok(self.token(start, TokenKind::Plus)),
                     '-' => Ok(self.token(start, TokenKind::Minus)),
                     '*' => Ok(self.token(start, TokenKind::Star)),
-                    '/' => Ok(self.token(start, TokenKind::Slash)),
+                    '/' => {
+                        if self.slash_starts_regex() {
+                            self.read_regex(start)
+                        } else {
+                            Ok(self.token(start, TokenKind::Slash))
+                        }
+                    }
                     '%' => Ok(self.token(start, TokenKind::Percent)),
                     '=' => {
                         if self.peek_char() == Some('=') {
@@ -239,6 +318,7 @@ impl<'a> Lexer<'a> {
         loop {
             let token = self.next_token()?;
             let is_eof = token.kind == TokenKind::Eof;
+            self.prev_kind = Some(token.kind.clone());
             tokens.push(token);
             if is_eof {
                 break;

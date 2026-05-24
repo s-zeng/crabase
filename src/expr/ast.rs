@@ -39,6 +39,9 @@ impl std::fmt::Display for Ident {
 pub enum Literal {
     Number(f64),
     Str(String),
+    /// Regex literal source: `/pattern/`. Stored as the raw pattern so the
+    /// translator can pass it through to polars's regex-aware string methods.
+    Regex(String),
     Bool(bool),
     Null,
 }

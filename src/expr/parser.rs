@@ -166,6 +166,13 @@ impl Parser {
                 let token = self.advance();
                 Ok(Expr::new(ExprKind::Literal(Literal::Str(text)), token.span))
             }
+            TokenKind::Regex(pattern) => {
+                let token = self.advance();
+                Ok(Expr::new(
+                    ExprKind::Literal(Literal::Regex(pattern)),
+                    token.span,
+                ))
+            }
             TokenKind::Bool(value) => {
                 let token = self.advance();
                 Ok(Expr::new(

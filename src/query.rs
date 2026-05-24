@@ -9,9 +9,9 @@ use polars::prelude::*;
 
 use crate::base_file::{BaseFile, SortDirection, View};
 use crate::error::Result;
-use crate::expr::{TranslateCtx, parse, translate};
+use crate::expr::{InferredType, TranslateCtx, parse, translate};
 use crate::filter::combine_filters;
-use crate::vault::{VaultSchema, scan_vault_to_lazyframe};
+use crate::vault::{VaultSchema, obsidian_sort_key, scan_vault_to_lazyframe};
 
 /// Execute a query against the vault for a given view, returning the result as
 /// a polars `DataFrame`. Column order matches `view.order`.
@@ -42,7 +42,9 @@ pub fn execute_query(vault_root: &Path, base_file: &BaseFile, view: &View) -> Re
 }
 
 /// Build the list of polars expressions to sort by. Always appends a
-/// tie-breaker on `file_name` ascending.
+/// tie-breaker on `file_name` ascending. If no explicit sort is given, fall
+/// back to sorting by the first column in `order` (matching Obsidian's
+/// implicit default).
 fn sort_exprs(
     view: &View,
     ctx: &TranslateCtx,
@@ -52,56 +54,120 @@ fn sort_exprs(
     let mut descending: Vec<bool> = Vec::new();
 
     if let Some(gb) = &view.group_by {
-        let e = property_to_expr(&gb.property, ctx, schema)?;
+        let e = sort_expr_for(&gb.property, ctx, schema)?;
         exprs.push(e);
         descending.push(matches!(gb.direction, SortDirection::Desc));
     }
     if let Some(sorts) = &view.sort {
         for key in sorts {
-            let e = property_to_expr(&key.property, ctx, schema)?;
+            let e = sort_expr_for(&key.property, ctx, schema)?;
             exprs.push(e);
             descending.push(matches!(key.direction, SortDirection::Desc));
         }
     }
 
     if exprs.is_empty() {
-        return Ok(None);
+        if let Some(first) = view.order.as_ref().and_then(|o| o.first()) {
+            let e = sort_expr_for(first, ctx, schema)?;
+            exprs.push(e);
+            descending.push(false);
+        } else {
+            return Ok(None);
+        }
     }
-    // Tie-break by file_name ascending (matches old behavior).
-    exprs.push(col("file_name"));
+    // Tie-break by file_path then file_name ascending. We sort on the
+    // precomputed `*_natkey` columns so the order matches Obsidian's
+    // `localeCompare(_, {numeric: true})`: numeric runs sort numerically,
+    // and punctuation keeps its code-point weight (so e.g. "Study Notes.md"
+    // sorts before "Study.md" via the space vs period comparison).
+    exprs.push(col("file_path_natkey"));
+    descending.push(false);
+    exprs.push(col("file_name_natkey"));
     descending.push(false);
     Ok(Some((exprs, descending)))
 }
 
-/// Convert a property name (as appears in `groupBy.property` or `sort[].property`)
-/// to a polars expression. Supports `file.X`, `note.X`, `formula.X`, and bare
-/// frontmatter keys.
-fn property_to_expr(prop: &str, ctx: &TranslateCtx, schema: &VaultSchema) -> Result<Expr> {
+/// Build a stable, Obsidian-compatible sort key from a string expression.
+/// Per-row, replaces digit runs with 16-char zero-padded versions and
+/// lowercases everything else — same shape as the file_path_natkey column,
+/// matching Obsidian's `localeCompare(_, {numeric: true})`. Implemented as
+/// an Expr::map so it can wrap arbitrary string-valued exprs (including
+/// the output of formulas).
+fn string_sort_key(e: Expr) -> Expr {
+    e.cast(DataType::String).map(
+        |c: Column| {
+            let s = c.as_materialized_series();
+            let ca = s.str()?;
+            let out: StringChunked = ca
+                .into_iter()
+                .map(|opt| opt.map(obsidian_sort_key))
+                .collect();
+            let out = out.with_name(s.name().clone());
+            Ok(Some(out.into_column()))
+        },
+        GetOutput::from_type(DataType::String),
+    )
+}
+
+/// Translate a sort property into a (sort-key expr, inferred type) pair.
+/// For string-typed values we apply `string_sort_key` so the order matches
+/// Obsidian; for any other type we return the value as-is.
+fn sort_expr_for(prop: &str, ctx: &TranslateCtx, schema: &VaultSchema) -> Result<Expr> {
+    let (base, is_string) = sort_base_expr(prop, ctx, schema)?;
+    if is_string {
+        Ok(string_sort_key(base))
+    } else {
+        Ok(base)
+    }
+}
+
+fn sort_base_expr(prop: &str, ctx: &TranslateCtx, schema: &VaultSchema) -> Result<(Expr, bool)> {
     if let Some(rest) = prop.strip_prefix("file.") {
         let col_name = format!("file_{rest}");
         if schema.has_column(&col_name) {
-            return Ok(col(col_name));
+            let is_string = matches!(schema.dtype(&col_name), Some(DataType::String));
+            return Ok((col(col_name), is_string));
         }
-        return Ok(lit(NULL));
+        return Ok((null_column_expr(), false));
     }
     if let Some(rest) = prop.strip_prefix("note.") {
         if let Some(name) = schema.resolve_frontmatter(rest) {
-            return Ok(col(name.to_string()));
+            let is_string = matches!(schema.dtype(name), Some(DataType::String));
+            return Ok((col(name.to_string()), is_string));
         }
-        return Ok(lit(NULL));
+        return Ok((null_column_expr(), false));
     }
     if let Some(rest) = prop.strip_prefix("formula.") {
         if let Some(body) = ctx.formulas.get(rest) {
             let ast = parse(body)?;
             let t = translate(&ast, ctx)?;
-            return Ok(t.expr);
+            let is_string = matches!(t.ty, InferredType::String);
+            return Ok((broadcast_to_frame(t.expr), is_string));
         }
-        return Ok(lit(NULL));
+        return Ok((null_column_expr(), false));
     }
     if let Some(name) = schema.resolve_frontmatter(prop) {
-        return Ok(col(name.to_string()));
+        let is_string = matches!(schema.dtype(name), Some(DataType::String));
+        return Ok((col(name.to_string()), is_string));
     }
-    Ok(lit(NULL))
+    Ok((null_column_expr(), false))
+}
+
+/// A null-valued expression with the LazyFrame's row count. Built by taking a
+/// known-present column (`file_path`) and substituting null for every row.
+fn null_column_expr() -> Expr {
+    when(col("file_path").is_not_null())
+        .then(lit(NULL))
+        .otherwise(lit(NULL))
+}
+
+/// If `e` happens to evaluate to a scalar (e.g. an unsupported AST node that
+/// collapsed to `lit(NULL)`), wrap it so polars broadcasts it across the
+/// LazyFrame. Safe to apply to columnar exprs — they pass through unchanged.
+fn broadcast_to_frame(e: Expr) -> Expr {
+    when(col("file_path").is_not_null())
+        .then(e.clone())
+        .otherwise(e)
 }
 
 /// Build the `select` expressions, one per `view.order` column, applying the
@@ -142,9 +208,9 @@ fn column_to_expr(column: &str, ctx: &TranslateCtx, schema: &VaultSchema) -> Res
         if let Some(body) = ctx.formulas.get(rest) {
             let ast = parse(body)?;
             let t = translate(&ast, ctx)?;
-            return Ok(t.expr);
+            return Ok(broadcast_to_frame(t.expr));
         }
-        return Ok(lit(NULL));
+        return Ok(null_column_expr());
     }
     if let Some(rest) = column.strip_prefix("note.") {
         if let Some(name) = schema.resolve_frontmatter(rest) {
