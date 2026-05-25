@@ -561,6 +561,320 @@ fn test_parser_reports_precise_error_positions() {
     insta::assert_snapshot!(error, @"Expression parse error: Expected identifier after '.' at 4, got Number(3.0)");
 }
 
+// ---------- Tests covering the `q` (fixes) changeset ----------
+
+// Regex literal `/pattern/` routes `replace()` to regex mode; the same
+// expression with a string pattern stays literal (so `.` doesn't act as a
+// wildcard).
+
+#[test]
+fn test_replace_regex_literal_uses_regex_mode() {
+    insta::assert_snapshot!(eval_expr("\"abc123def\".replace(/\\d+/, \"X\")"));
+}
+
+#[test]
+fn test_replace_string_pattern_is_literal() {
+    // The `.` is a literal dot, not a wildcard, when the pattern is a string.
+    insta::assert_snapshot!(eval_expr("\"a.b.c\".replace(\".\", \"-\")"));
+}
+
+#[test]
+fn test_division_still_works_after_identifier_or_number() {
+    // The lookbehind rule must keep `/` as division when the previous token
+    // is a number or identifier (not the start of a regex literal).
+    insta::assert_snapshot!(eval_expr("10 / 2"));
+}
+
+#[test]
+fn test_division_always_returns_float() {
+    // Obsidian Bases: `5/2` is `2.5`, not `2`.
+    insta::assert_snapshot!(eval_expr("5 / 2"));
+}
+
+// `if(cond, a, b)` should promote numeric branches to a common Float64, not
+// fall through to string-casting both sides.
+
+#[test]
+fn test_if_numeric_branches_remain_numeric() {
+    // If the result were string-cast, the trailing `+ 0.5` would yield a
+    // string concat or polars error rather than 0.5.
+    insta::assert_snapshot!(eval_expr("if(true, 0, 1.5) + 0.5"));
+}
+
+// Case-insensitive string predicates (Obsidian semantics).
+
+#[test]
+fn test_contains_is_case_insensitive() {
+    insta::assert_snapshot!(eval_expr_with_inputs(
+        "title.contains(\"hello\")",
+        vec![("title", AnyValue::StringOwned("Hello World".into()))],
+    ));
+}
+
+#[test]
+fn test_starts_with_is_case_insensitive() {
+    insta::assert_snapshot!(eval_expr_with_inputs(
+        "title.startsWith(\"HELLO\")",
+        vec![("title", AnyValue::StringOwned("hello world".into()))],
+    ));
+}
+
+#[test]
+fn test_ends_with_is_case_insensitive() {
+    insta::assert_snapshot!(eval_expr_with_inputs(
+        "title.endsWith(\"WORLD\")",
+        vec![("title", AnyValue::StringOwned("hello world".into()))],
+    ));
+}
+
+#[test]
+fn test_contains_any_matches_any_argument() {
+    insta::assert_snapshot!(eval_expr_with_inputs(
+        "title.containsAny(\"baz\", \"WORLD\")",
+        vec![("title", AnyValue::StringOwned("hello world".into()))],
+    ));
+}
+
+#[test]
+fn test_contains_any_returns_false_when_no_match() {
+    insta::assert_snapshot!(eval_expr_with_inputs(
+        "title.containsAny(\"baz\", \"qux\")",
+        vec![("title", AnyValue::StringOwned("hello world".into()))],
+    ));
+}
+
+// `.title()` titlecases each word and strips wikilink wrappers first.
+
+#[test]
+fn test_title_case_basic() {
+    insta::assert_snapshot!(eval_expr("\"hello world\".title()"));
+}
+
+#[test]
+fn test_title_case_strips_wikilink_wrapper() {
+    insta::assert_snapshot!(eval_expr("\"[[foo bar baz]]\".title()"));
+}
+
+#[test]
+fn test_title_case_treats_digits_as_word_break() {
+    // "25-19 to" titles as "25-19 To" because non-alpha chars (digits, dashes)
+    // are word separators.
+    insta::assert_snapshot!(eval_expr("\"25-19 to\".title()"));
+}
+
+// `link()` is idempotent on already-bracketed input.
+
+#[test]
+fn test_link_is_idempotent_on_bracketed_input() {
+    insta::assert_snapshot!(eval_expr("link(\"[[Foo]]\")"));
+}
+
+#[test]
+fn test_link_with_display_idempotent_on_bracketed_input() {
+    // Even with a display arg, an already-linked path stays verbatim.
+    insta::assert_snapshot!(eval_expr("link(\"[[Foo]]\", \"Bar\")"));
+}
+
+#[test]
+fn test_link_with_display_wraps_plain_path() {
+    insta::assert_snapshot!(eval_expr("link(\"Foo\", \"Bar\")"));
+}
+
+// `date()` now accepts ISO datetime (T-separated), ISO date, or
+// space-separated datetime — first match wins.
+
+#[test]
+fn test_date_iso_t_separated_datetime() {
+    insta::assert_snapshot!(eval_expr("date(\"2025-04-27T15:30:00\").hour"));
+}
+
+// List operations: concatenation via `+`, slice with negative end, null
+// propagation through `.length`.
+
+#[test]
+fn test_list_plus_list_concatenates() {
+    insta::assert_snapshot!(eval_expr("[1, 2] + [3, 4]"));
+}
+
+#[test]
+fn test_list_slice_positive_bounds() {
+    insta::assert_snapshot!(eval_expr("[1, 2, 3, 4, 5].slice(1, 3)"));
+}
+
+#[test]
+fn test_list_slice_negative_end_drops_tail() {
+    insta::assert_snapshot!(eval_expr("[1, 2, 3, 4].slice(0, -1)"));
+}
+
+#[test]
+fn test_list_length_on_empty_list_is_zero() {
+    // Empty list length is 0 (the null-propagation case for an absent list
+    // column is covered by the vault-level backlinks fixture).
+    insta::assert_snapshot!(eval_expr_with_inputs(
+        "attendees.length",
+        vec![(
+            "attendees",
+            AnyValue::List(Series::new_empty("".into(), &DataType::String)),
+        )],
+    ));
+}
+
+// Bare `file` resolves to the file_path column; `file.basename` aliases
+// `file.name`.
+
+#[test]
+fn test_bare_file_resolves_to_file_path() {
+    insta::assert_snapshot!(eval_expr_with_inputs(
+        "file",
+        vec![("file_path", AnyValue::StringOwned("Notes/foo.md".into()),)],
+    ));
+}
+
+#[test]
+fn test_file_basename_aliases_file_name() {
+    insta::assert_snapshot!(eval_expr_with_inputs(
+        "file.basename",
+        vec![("file_name", AnyValue::StringOwned("foo".into()))],
+    ));
+}
+
+// Wikilink anchor in target is dropped during link extraction.
+
+#[test]
+fn test_obsidian_sort_key_numeric_runs_sort_numerically() {
+    // The natural sort key must zero-pad digit runs so "Exodus 9" sorts
+    // before "Exodus 19" (without padding, "19" sorts before "9").
+    use crabase_lib::vault::obsidian_sort_key;
+    let mut items = vec![
+        "Exodus 19".to_string(),
+        "Exodus 9".to_string(),
+        "Exodus 11".to_string(),
+    ];
+    items.sort_by_key(|s| obsidian_sort_key(s));
+    insta::assert_snapshot!(items.join("\n"));
+}
+
+#[test]
+fn test_obsidian_sort_key_collapses_punctuation() {
+    // Apostrophes/periods become whitespace so they don't fragment the order.
+    use crabase_lib::vault::obsidian_sort_key;
+    let mut items = vec![
+        "D. E. Shaw".to_string(),
+        "d'Vijff Vlieghen".to_string(),
+        "Daffy Duck".to_string(),
+    ];
+    items.sort_by_key(|s| obsidian_sort_key(s));
+    insta::assert_snapshot!(items.join("\n"));
+}
+
+#[test]
+fn test_natural_sort_key_preserves_punctuation() {
+    // Path-style key keeps punctuation distinctions: "Study Notes.md" vs
+    // "Study.md" — space (0x20) < period (0x2E), so Notes sorts first.
+    use crabase_lib::vault::natural_sort_key;
+    let mut items = vec!["Study.md".to_string(), "Study Notes.md".to_string()];
+    items.sort_by_key(|s| natural_sort_key(s));
+    insta::assert_snapshot!(items.join("\n"));
+}
+
+// ---------- Vault-level tests covering the `q` (fixes) changeset ----------
+
+// Backlinks exercise multiple link-resolution rules at once:
+//   - body wikilinks (LinkerBody)
+//   - pure-frontmatter wikilinks counted as both links and backlinks (LinkerFrontmatter)
+//   - inline frontmatter wikilinks counted only as backlinks (LinkerInlineFrontmatter)
+//   - wikilink with `#anchor` / `|alias` resolves to the target file (LinkerWithAnchor)
+//   - wikilinks inside fenced code regions are skipped (LinkerInCode → NOT in list)
+//   - canvas-file mentions contribute (diagram.canvas)
+
+#[test]
+fn test_backlinks_includes_body_frontmatter_inline_anchor_and_canvas() {
+    let vault = fixtures_vault();
+    let base_path = fixtures_base("backlinks.base");
+    let output = run_query(&vault, &base_path, None);
+    insta::assert_snapshot!(output);
+}
+
+// `file.links` only contains *pure* frontmatter wikilinks and body wikilinks;
+// inline frontmatter wikilinks and code-fenced ones are omitted.
+
+#[test]
+fn test_file_links_excludes_inline_frontmatter_and_code_regions() {
+    let vault = fixtures_vault();
+    let base_path = fixtures_base("backlinks_links.base");
+    let output = run_query(&vault, &base_path, None);
+    insta::assert_snapshot!(output);
+}
+
+// Numeric runs in file names sort numerically (Exodus 1 → 9 → 11, not 1 → 11 → 9).
+
+#[test]
+fn test_natural_sort_orders_numeric_filenames() {
+    let vault = fixtures_vault();
+    let base_path = fixtures_base("natural_sort.base");
+    let output = run_query(&vault, &base_path, None);
+    insta::assert_snapshot!(output);
+}
+
+// When no `sort` or `groupBy` is set, the query falls back to sorting by the
+// first column of `view.order`. Here `timeEstimate` ascending: 1, 1, 2.
+
+#[test]
+fn test_implicit_sort_uses_first_order_column() {
+    let vault = fixtures_vault();
+    let base_path = fixtures_base("implicit_sort.base");
+    let output = run_query(&vault, &base_path, None);
+    insta::assert_snapshot!(output);
+}
+
+// Header transformation aliases each `file.*` reserved column to Obsidian's
+// friendly name. We only check the header row so test stays insensitive to
+// mtime/ctime/size values.
+
+#[test]
+fn test_file_metadata_column_headers_use_friendly_aliases() {
+    use crabase_lib::base_file::BaseFile;
+    use crabase_lib::output::write_csv;
+    use crabase_lib::query::execute_query;
+    let vault = fixtures_vault();
+    let base_path = fixtures_base("header_aliases.base");
+    let content = std::fs::read_to_string(&base_path).expect("read base file");
+    let base_file = BaseFile::parse(&content).expect("parse base file");
+    let view = base_file.get_view(None).expect("get view");
+    let columns = view.order.clone().unwrap_or_default();
+    let df = execute_query(&vault, &base_file, view).expect("execute query");
+    let mut out = Vec::new();
+    write_csv(&mut out, &columns, &df, &base_file).expect("write csv");
+    let csv = String::from_utf8(out).expect("utf8");
+    let header = csv.lines().next().unwrap_or("").to_string();
+    insta::assert_snapshot!(header);
+}
+
+// CSV datetime cells now use ISO `T`-separator instead of a space. Build a
+// 1-row DataFrame containing a Datetime column and inspect the CSV cell.
+
+#[test]
+fn test_csv_datetime_cell_uses_iso_t_separator() {
+    use crabase_lib::base_file::BaseFile;
+    use crabase_lib::output::write_csv;
+    let base_file =
+        BaseFile::parse("views:\n  - type: table\n    name: \"X\"\n    order:\n      - when\n")
+            .expect("parse base");
+    // 2025-04-27T15:30:00 UTC, in microseconds since epoch.
+    let micros: i64 = chrono::NaiveDate::from_ymd_opt(2025, 4, 27)
+        .and_then(|d| d.and_hms_opt(15, 30, 0))
+        .map(|dt| dt.and_utc().timestamp_micros())
+        .expect("timestamp");
+    let series = Series::new("when".into(), &[micros])
+        .cast(&DataType::Datetime(TimeUnit::Microseconds, None))
+        .expect("cast datetime");
+    let df = DataFrame::new(vec![series.into_column()]).expect("dataframe");
+    let mut out = Vec::new();
+    write_csv(&mut out, &["when".to_string()], &df, &base_file).expect("write csv");
+    let csv = String::from_utf8(out).expect("utf8");
+    insta::assert_snapshot!(csv);
+}
+
 proptest! {
     #[test]
     fn prop_addition_respects_precedence(

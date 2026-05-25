@@ -1,0 +1,10 @@
+filters:
+  and:
+    - "file.folder == \"Backlinks\""
+    - "file.name == \"Hub\""
+views:
+  - type: table
+    name: "Hub"
+    order:
+      - file.name
+      - file.backlinks

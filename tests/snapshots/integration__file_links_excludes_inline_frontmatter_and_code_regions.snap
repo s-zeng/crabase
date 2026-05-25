@@ -1,0 +1,10 @@
+---
+source: tests/integration.rs
+expression: output
+---
+file name,links
+LinkerBody,Hub
+LinkerFrontmatter,Hub
+LinkerInCode,
+LinkerInlineFrontmatter,
+LinkerWithAnchor,Hub

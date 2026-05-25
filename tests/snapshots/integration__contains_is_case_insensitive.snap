@@ -1,0 +1,5 @@
+---
+source: tests/integration.rs
+expression: "eval_expr_with_inputs(\"title.contains(\\\"hello\\\")\",\nvec![(\"title\", AnyValue::StringOwned(\"Hello World\".into()))],)"
+---
+true

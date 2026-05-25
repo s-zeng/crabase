@@ -1,0 +1,8 @@
+---
+source: tests/integration.rs
+expression: output
+---
+file name
+Exodus 1
+Exodus 9
+Exodus 11

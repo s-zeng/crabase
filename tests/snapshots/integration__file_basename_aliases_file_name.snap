@@ -1,0 +1,5 @@
+---
+source: tests/integration.rs
+expression: "eval_expr_with_inputs(\"file.basename\",\nvec![(\"file_name\", AnyValue::StringOwned(\"foo\".into()))],)"
+---
+foo

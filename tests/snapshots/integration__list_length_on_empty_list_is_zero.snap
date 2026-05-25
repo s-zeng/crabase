@@ -1,0 +1,5 @@
+---
+source: tests/integration.rs
+expression: "eval_expr_with_inputs(\"attendees.length\",\nvec![(\"attendees\",\nAnyValue::List(Series::new_empty(\"\".into(), &DataType::String)),)],)"
+---
+0

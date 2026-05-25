@@ -1,0 +1,15 @@
+filters:
+  and:
+    - "file.folder == \"Tasks\""
+views:
+  - type: table
+    name: "Headers"
+    order:
+      - file.mtime
+      - file.ctime
+      - file.folder
+      - file.ext
+      - file.size
+      - file.path
+      - file.tags
+      - file.links

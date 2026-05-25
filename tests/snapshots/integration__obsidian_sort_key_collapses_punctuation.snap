@@ -1,0 +1,7 @@
+---
+source: tests/integration.rs
+expression: "items.join(\"\\n\")"
+---
+D. E. Shaw
+d'Vijff Vlieghen
+Daffy Duck

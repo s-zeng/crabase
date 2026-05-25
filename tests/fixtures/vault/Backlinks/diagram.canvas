@@ -1,0 +1,15 @@
+{
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "text",
+      "text": "Mentions [[Hub]] in canvas text."
+    },
+    {
+      "id": "n2",
+      "type": "file",
+      "file": "Backlinks/Hub.md"
+    }
+  ],
+  "edges": []
+}

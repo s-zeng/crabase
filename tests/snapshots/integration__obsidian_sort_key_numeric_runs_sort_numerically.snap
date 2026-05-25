@@ -1,0 +1,7 @@
+---
+source: tests/integration.rs
+expression: "items.join(\"\\n\")"
+---
+Exodus 9
+Exodus 11
+Exodus 19

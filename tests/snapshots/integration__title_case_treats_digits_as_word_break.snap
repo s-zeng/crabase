@@ -1,0 +1,5 @@
+---
+source: tests/integration.rs
+expression: "eval_expr(\"\\\"25-19 to\\\".title()\")"
+---
+25-19 To

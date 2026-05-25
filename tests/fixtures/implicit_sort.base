@@ -1,0 +1,9 @@
+filters:
+  and:
+    - "file.folder == \"Tasks\""
+views:
+  - type: table
+    name: "ImplicitSort"
+    order:
+      - timeEstimate
+      - file.name

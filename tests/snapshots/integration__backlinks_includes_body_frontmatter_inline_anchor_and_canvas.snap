@@ -1,0 +1,6 @@
+---
+source: tests/integration.rs
+expression: output
+---
+file name,file backlinks
+Hub,"Backlinks/LinkerBody.md, Backlinks/LinkerFrontmatter.md, Backlinks/LinkerInlineFrontmatter.md, Backlinks/LinkerWithAnchor.md, Backlinks/diagram.canvas"

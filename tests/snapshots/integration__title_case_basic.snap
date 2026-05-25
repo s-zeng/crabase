@@ -1,0 +1,5 @@
+---
+source: tests/integration.rs
+expression: "eval_expr(\"\\\"hello world\\\".title()\")"
+---
+Hello World

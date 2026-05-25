@@ -1,0 +1,11 @@
+filters:
+  and:
+    - "file.folder == \"NaturalSort\""
+views:
+  - type: table
+    name: "Numeric file names"
+    order:
+      - file.name
+    sort:
+      - property: file.name
+        direction: ASC
