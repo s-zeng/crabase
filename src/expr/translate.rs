@@ -1126,19 +1126,19 @@ fn translate_file_method(method: &str, args: &[AstExpr], ctx: &TranslateCtx) -> 
             ))
         }
         "hasTag" => {
-            let predicate = args
-                .iter()
-                .map(string_literal)
-                .try_fold(lit(false), |acc, needle| {
-                    let needle = needle?;
-                    let prefix = format!("{needle}/");
-                    let elem = col("");
-                    let one = elem
-                        .clone()
-                        .eq(lit(needle))
-                        .or(elem.str().starts_with(lit(prefix)));
-                    Ok::<_, CrabaseError>(acc.or(one))
-                })?;
+            let predicate =
+                args.iter()
+                    .map(string_literal)
+                    .try_fold(lit(false), |acc, needle| {
+                        let needle = needle?;
+                        let prefix = format!("{needle}/");
+                        let elem = col("");
+                        let one = elem
+                            .clone()
+                            .eq(lit(needle))
+                            .or(elem.str().starts_with(lit(prefix)));
+                        Ok::<_, CrabaseError>(acc.or(one))
+                    })?;
             Ok(Translated::new(
                 col("file_tags")
                     .list()
@@ -1150,23 +1150,23 @@ fn translate_file_method(method: &str, args: &[AstExpr], ctx: &TranslateCtx) -> 
             ))
         }
         "hasLink" => {
-            let predicate = args
-                .iter()
-                .map(string_literal)
-                .try_fold(lit(false), |acc, needle| {
-                    let needle = needle?;
-                    let with_slash = format!("/{needle}");
-                    let md = format!("{needle}.md");
-                    let with_slash_md = format!("/{needle}.md");
-                    let elem = col("");
-                    let one = elem
-                        .clone()
-                        .eq(lit(needle))
-                        .or(elem.clone().str().ends_with(lit(with_slash)))
-                        .or(elem.clone().eq(lit(md)))
-                        .or(elem.str().ends_with(lit(with_slash_md)));
-                    Ok::<_, CrabaseError>(acc.or(one))
-                })?;
+            let predicate =
+                args.iter()
+                    .map(string_literal)
+                    .try_fold(lit(false), |acc, needle| {
+                        let needle = needle?;
+                        let with_slash = format!("/{needle}");
+                        let md = format!("{needle}.md");
+                        let with_slash_md = format!("/{needle}.md");
+                        let elem = col("");
+                        let one = elem
+                            .clone()
+                            .eq(lit(needle))
+                            .or(elem.clone().str().ends_with(lit(with_slash)))
+                            .or(elem.clone().eq(lit(md)))
+                            .or(elem.str().ends_with(lit(with_slash_md)));
+                        Ok::<_, CrabaseError>(acc.or(one))
+                    })?;
             Ok(Translated::new(
                 col("file_links")
                     .list()

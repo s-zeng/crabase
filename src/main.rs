@@ -120,13 +120,17 @@ fn run() -> Result<()> {
 
     let df = execute_query(&vault_root, &base_file, view)?;
 
+    // 64 KiB BufWriter so per-cell write_all calls coalesce into a handful of
+    // write(2) syscalls instead of one per chunk.
     let stdout = std::io::stdout();
-    let mut out = stdout.lock();
+    let mut out = std::io::BufWriter::with_capacity(64 * 1024, stdout.lock());
     match format {
         "csv" => write_csv(&mut out, &columns, &df, &base_file).map_err(CrabaseError::Io)?,
         "toon" => write_toon(&mut out, &columns, &df, &base_file).map_err(CrabaseError::Io)?,
         _ => unreachable!(),
     }
+    use std::io::Write;
+    out.flush().map_err(CrabaseError::Io)?;
 
     Ok(())
 }

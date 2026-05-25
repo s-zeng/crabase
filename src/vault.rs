@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 use polars::prelude::*;
+use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use crate::error::{CrabaseError, Result};
@@ -136,11 +137,56 @@ impl VaultSchema {
 /// wikilinks so they contribute to backlink counts (Obsidian's
 /// `file.backlinks` includes references from canvases too).
 pub fn scan_vault_to_lazyframe(vault_root: &Path) -> Result<(LazyFrame, VaultSchema)> {
-    let raw_files = collect_raw_files(vault_root)?;
-    let canvas_links = collect_canvas_links(vault_root)?;
+    let WalkBuckets {
+        md_paths,
+        canvas_paths,
+    } = walk_vault(vault_root);
+    // Parallelise the per-file I/O + parse. Rayon's collect preserves insertion
+    // order, so the resulting Vec mirrors what the sequential walk produced.
+    let raw_files: Vec<RawFile> = md_paths
+        .into_par_iter()
+        .map(|p| read_raw_file(vault_root, &p))
+        .collect::<Result<_>>()?;
+    let canvas_links: Vec<CanvasLinks> = canvas_paths
+        .into_par_iter()
+        .filter_map(|p| read_canvas_links(vault_root, &p))
+        .collect();
     let (df, mut schema) = build_dataframe(raw_files, canvas_links)?;
-    schema.df = std::sync::Arc::new(df.clone());
-    Ok((df.lazy(), schema))
+    // Share the materialised DataFrame between the LazyFrame and the schema:
+    // wrap once in an Arc and clone the inner DataFrame (polars chunks are
+    // Arc-backed, so this is metadata-only) for the lazy frame.
+    let df_arc = std::sync::Arc::new(df);
+    let lf = (*df_arc).clone().lazy();
+    schema.df = df_arc;
+    Ok((lf, schema))
+}
+
+/// Single-pass walk that buckets `.md` and `.canvas` file paths so the per-file
+/// I/O stage downstream can fan out in parallel without re-walking.
+struct WalkBuckets {
+    md_paths: Vec<PathBuf>,
+    canvas_paths: Vec<PathBuf>,
+}
+
+fn walk_vault(vault_root: &Path) -> WalkBuckets {
+    let mut buckets = WalkBuckets {
+        md_paths: Vec::new(),
+        canvas_paths: Vec::new(),
+    };
+    for entry in WalkDir::new(vault_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        let path = entry.path();
+        match path.extension().and_then(|x| x.to_str()) {
+            Some("md") => buckets.md_paths.push(path.to_path_buf()),
+            Some("canvas") => buckets.canvas_paths.push(path.to_path_buf()),
+            _ => {}
+        }
+    }
+    buckets
 }
 
 /// Return relative paths of all `.base` files in the vault, sorted.
@@ -177,24 +223,14 @@ struct RawFile {
     mtime: Option<NaiveDateTime>,
     frontmatter: BTreeMap<String, serde_yaml::Value>,
     tags: Vec<String>,
-    /// Wikilinks parsed from the body only — matches what Obsidian exposes
-    /// through `file.links`.
+    /// Wikilinks parsed from frontmatter link-typed properties + body. Matches
+    /// what Obsidian exposes through `file.links`.
     links: Vec<String>,
-    /// Wikilinks parsed from frontmatter + body. Used for backlink resolution,
-    /// where Obsidian does count `[[…]]` mentions embedded in frontmatter
-    /// strings (e.g. a `comment:` field that name-drops another note).
-    all_links: Vec<String>,
-}
-
-fn collect_raw_files(vault_root: &Path) -> Result<Vec<RawFile>> {
-    WalkDir::new(vault_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("md"))
-        .map(|entry| read_raw_file(vault_root, entry.path()))
-        .collect()
+    /// Wikilinks parsed only from non-link frontmatter strings (e.g. a
+    /// `comment:` field that mentions `[[Foo]]`). Concatenated with `links`
+    /// during backlink resolution. Kept separate so we don't pay a Vec clone
+    /// per file just to build a union.
+    inline_fm_links: Vec<String>,
 }
 
 /// External wikilink source: a non-markdown file (currently `.canvas`) that
@@ -205,32 +241,23 @@ struct CanvasLinks {
     links: Vec<String>,
 }
 
-fn collect_canvas_links(vault_root: &Path) -> Result<Vec<CanvasLinks>> {
-    WalkDir::new(vault_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("canvas"))
-        .filter_map(|entry| {
-            let abs_path = entry.path();
-            let rel_path = abs_path
-                .strip_prefix(vault_root)
-                .ok()?
-                .to_string_lossy()
-                .replace('\\', "/");
-            let content = std::fs::read_to_string(abs_path).ok()?;
-            // Canvas files are JSON; the embedded note bodies live in `text`
-            // properties on text nodes. We just extract the strings without
-            // parsing the JSON — the wikilink regex is unambiguous against the
-            // surrounding JSON syntax.
-            let mut links = extract_wikilinks(&content);
-            // The structured form `"file": "path/to/note.md"` also counts as a
-            // link to that file. Pull those out by hand.
-            links.extend(extract_canvas_file_refs(&content));
-            Some(Ok(CanvasLinks { rel_path, links }))
-        })
-        .collect()
+/// Parse one canvas file's wikilink / `"file":` references. Returns `None` if
+/// the file can't be read (matches the previous silent-skip behaviour) so
+/// callers can pipeline this through `filter_map`.
+fn read_canvas_links(vault_root: &Path, abs_path: &Path) -> Option<CanvasLinks> {
+    let rel_path = abs_path
+        .strip_prefix(vault_root)
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let content = std::fs::read_to_string(abs_path).ok()?;
+    // Canvas files are JSON; embedded note bodies live in `text` properties on
+    // text nodes. The wikilink regex is unambiguous against JSON syntax, so we
+    // just scan the raw text for `[[…]]` instead of parsing.
+    let mut links = extract_wikilinks(&content);
+    // Structured `"file": "path/to/note.md"` references also count as links.
+    links.extend(extract_canvas_file_refs(&content));
+    Some(CanvasLinks { rel_path, links })
 }
 
 /// Yield the string targets of `"file": "..."` JSON entries (one per line).
@@ -283,7 +310,7 @@ fn read_raw_file(vault_root: &Path, abs_path: &Path) -> Result<RawFile> {
     let mut seen_tags: HashSet<String> = HashSet::new();
     let tags: Vec<String> = extract_frontmatter_tags(&frontmatter)
         .into_iter()
-        .chain(extract_inline_tags(&body))
+        .chain(extract_inline_tags(body))
         .filter(|t| seen_tags.insert(t.clone()))
         .collect();
     // Obsidian counts frontmatter wikilinks only when the *entire* string
@@ -292,12 +319,8 @@ fn read_raw_file(vault_root: &Path, abs_path: &Path) -> Result<RawFile> {
     // wikilinks embedded inside a longer string (e.g. a `comment:` field)
     // don't count toward `file.links`.
     let mut links = extract_frontmatter_link_values(&frontmatter);
-    links.extend(extract_wikilinks(&body));
-    let all_links = {
-        let mut v = links.clone();
-        v.extend(extract_inline_frontmatter_wikilinks(&frontmatter));
-        v
-    };
+    links.extend(extract_wikilinks(body));
+    let inline_fm_links = extract_inline_frontmatter_wikilinks(&frontmatter);
 
     Ok(RawFile {
         rel_path,
@@ -310,15 +333,15 @@ fn read_raw_file(vault_root: &Path, abs_path: &Path) -> Result<RawFile> {
         frontmatter,
         tags,
         links,
-        all_links,
+        inline_fm_links,
     })
 }
 
 // ---------- Frontmatter & body parsing (carry over from previous impl) ----------
 
-fn parse_frontmatter(content: &str) -> (BTreeMap<String, serde_yaml::Value>, String) {
+fn parse_frontmatter(content: &str) -> (BTreeMap<String, serde_yaml::Value>, &str) {
     if !content.starts_with("---\n") && !content.starts_with("---\r\n") {
-        return (BTreeMap::new(), content.to_string());
+        return (BTreeMap::new(), content);
     }
 
     let after_open = if let Some(stripped) = content.strip_prefix("---\r\n") {
@@ -338,16 +361,12 @@ fn parse_frontmatter(content: &str) -> (BTreeMap<String, serde_yaml::Value>, Str
         .map(|(pos, _)| pos);
 
     let Some(close_pos) = close_pos else {
-        return (BTreeMap::new(), content.to_string());
+        return (BTreeMap::new(), content);
     };
 
     let yaml_str = &after_open[..close_pos];
     let rest_start = close_pos + 4;
-    let body = if rest_start <= after_open.len() {
-        after_open[rest_start..].to_string()
-    } else {
-        String::new()
-    };
+    let body = after_open.get(rest_start..).unwrap_or("");
 
     let map: BTreeMap<String, serde_yaml::Value> =
         serde_yaml::from_str(yaml_str).unwrap_or_default();
@@ -588,16 +607,25 @@ fn strip_code_regions(content: &str) -> String {
 }
 
 fn extract_wikilinks(content: &str) -> Vec<String> {
+    // Most strings (notably frontmatter values) have no backticks at all, so
+    // skip the O(n) code-region stripping pass entirely in that case.
+    if !content.as_bytes().contains(&b'`') {
+        return scan_wikilinks(content);
+    }
     let stripped = strip_code_regions(content);
+    scan_wikilinks(&stripped)
+}
+
+fn scan_wikilinks(text: &str) -> Vec<String> {
     let mut links = Vec::new();
-    let bytes = stripped.as_bytes();
+    let bytes = text.as_bytes();
     let mut i = 0;
     while i + 1 < bytes.len() {
         if bytes[i] == b'[' && bytes[i + 1] == b'[' {
             let start = i + 2;
-            if let Some(rel_end) = stripped[start..].find("]]") {
+            if let Some(rel_end) = text[start..].find("]]") {
                 let end = start + rel_end;
-                let inner = &stripped[start..end];
+                let inner = &text[start..end];
                 // Drop the alias/anchor suffix: the link target is everything
                 // before the first `|` or `#`. Obsidian resolves
                 // `[[Colossians 4#16|Colossians 4:16]]` as a backlink to
@@ -654,7 +682,7 @@ fn build_dataframe(
             frontmatter,
             tags,
             links,
-            all_links: _,
+            inline_fm_links: _,
         } = f;
         file_size.push(size);
         file_ctime.push(ctime.map(naive_to_micros));
@@ -776,7 +804,7 @@ fn compute_backlinks(raw_files: &[RawFile], canvas_links: &[CanvasLinks]) -> Vec
             })
     };
     for f in raw_files {
-        for link in &f.all_links {
+        for link in f.links.iter().chain(f.inline_fm_links.iter()) {
             if let Some(target) = resolve(link.as_str(), f.folder.as_str()) {
                 targets.entry(target).or_default().push(f.rel_path.as_str());
             }
