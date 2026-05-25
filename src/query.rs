@@ -173,8 +173,9 @@ fn broadcast_to_frame(e: Expr) -> Expr {
 /// Build the `select` expressions, one per `view.order` column, applying the
 /// `title` special case and the rename to the output header.
 fn column_select_exprs(view: &View, ctx: &TranslateCtx, schema: &VaultSchema) -> Result<Vec<Expr>> {
-    let order = view.order.clone().unwrap_or_default();
-    order
+    view.order
+        .as_deref()
+        .unwrap_or(&[])
         .iter()
         .map(|c| column_to_expr(c, ctx, schema).map(|e| e.alias(c.as_str())))
         .collect()

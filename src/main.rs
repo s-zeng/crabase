@@ -8,15 +8,12 @@ use crabase_lib::vault::scan_bases;
 
 /// Parse `key=value` style arguments from a list of strings.
 fn parse_kv_args(args: &[String]) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    for arg in args {
-        if let Some(eq_pos) = arg.find('=') {
-            let key = arg[..eq_pos].to_string();
-            let val = arg[eq_pos + 1..].to_string();
-            map.insert(key, val);
-        }
-    }
-    map
+    args.iter()
+        .filter_map(|arg| {
+            arg.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
+        .collect()
 }
 
 /// Entry point: parse CLI arguments and run query

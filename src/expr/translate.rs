@@ -335,15 +335,19 @@ fn translate_cross_file_property(
 /// Returns None when no usable rows remain.
 fn dedup_lookup_pair(keys: &Series, values: &Series) -> Option<(Series, Series)> {
     let key_chunked = keys.str().ok()?;
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut indices: Vec<u32> = Vec::with_capacity(keys.len());
-    for (i, k) in key_chunked.into_iter().enumerate() {
-        if let Some(k) = k {
-            if seen.insert(k.to_string()) {
-                indices.push(i as u32);
-            }
-        }
-    }
+    // Borrowed-key dedup: chunked entries live as long as `key_chunked`, so
+    // we sidestep a per-row `String` allocation that the previous owned-key
+    // HashSet performed.
+    let mut seen: std::collections::HashSet<&str> =
+        std::collections::HashSet::with_capacity(keys.len());
+    let indices: Vec<u32> = key_chunked
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, k)| {
+            let k = k?;
+            seen.insert(k).then_some(i as u32)
+        })
+        .collect();
     if indices.is_empty() {
         return None;
     }
@@ -486,11 +490,10 @@ fn translate_array(items: &[AstExpr], ctx: &TranslateCtx) -> Result<Translated> 
             InferredType::List,
         ));
     }
-    let translated: Vec<Translated> = items
+    let exprs: Vec<Expr> = items
         .iter()
-        .map(|i| translate_inner(i, ctx))
-        .collect::<Result<Vec<_>>>()?;
-    let exprs: Vec<Expr> = translated.into_iter().map(|t| t.expr).collect();
+        .map(|i| translate_inner(i, ctx).map(|t| t.expr))
+        .collect::<Result<_>>()?;
     Ok(Translated::new(concat_list(exprs)?, InferredType::List))
 }
 
@@ -533,11 +536,7 @@ fn translate_function_call(name: &str, args: &[AstExpr], ctx: &TranslateCtx) -> 
         "list" => {
             // list(x) wraps x in a single-element list. If x is already a list,
             // we keep it as-is. Polars: implode/wrap.
-            let inner: Vec<Translated> = args
-                .iter()
-                .map(|a| translate_inner(a, ctx))
-                .collect::<Result<Vec<_>>>()?;
-            let exprs: Vec<Expr> = inner.into_iter().map(|t| t.expr).collect();
+            let exprs = translate_args(args, ctx)?;
             Ok(Translated::new(concat_list(exprs)?, InferredType::List))
         }
         "min" => {
@@ -913,16 +912,16 @@ fn apply_string_method(
             InferredType::Bool,
         )),
         "containsAny" => {
-            let mut predicate: Expr = lit(false);
-            for arg in args {
-                predicate = predicate.or(recv
-                    .expr
+            // Lowercase the receiver once; polars can fold the repeated clones
+            // but keeping it explicit also keeps the generated expression tree
+            // smaller.
+            let recv_lower = recv.expr.str().to_lowercase();
+            let predicate = args.iter().fold(lit(false), |acc, arg| {
+                acc.or(recv_lower
                     .clone()
                     .str()
-                    .to_lowercase()
-                    .str()
-                    .contains_literal(arg.clone().str().to_lowercase()));
-            }
+                    .contains_literal(arg.clone().str().to_lowercase()))
+            });
             Ok(Translated::new(predicate, InferredType::Bool))
         }
         "startsWith" => Ok(Translated::new(
@@ -1127,21 +1126,19 @@ fn translate_file_method(method: &str, args: &[AstExpr], ctx: &TranslateCtx) -> 
             ))
         }
         "hasTag" => {
-            let needles: Vec<String> = args
+            let predicate = args
                 .iter()
                 .map(string_literal)
-                .collect::<Result<Vec<_>>>()?;
-            // Translate to col("file_tags").list.eval(any_match).list.any()
-            let mut predicate: Expr = lit(false);
-            for needle in &needles {
-                let prefix = format!("{needle}/");
-                let elem = col("");
-                let one = elem
-                    .clone()
-                    .eq(lit(needle.clone()))
-                    .or(elem.str().starts_with(lit(prefix)));
-                predicate = predicate.or(one);
-            }
+                .try_fold(lit(false), |acc, needle| {
+                    let needle = needle?;
+                    let prefix = format!("{needle}/");
+                    let elem = col("");
+                    let one = elem
+                        .clone()
+                        .eq(lit(needle))
+                        .or(elem.str().starts_with(lit(prefix)));
+                    Ok::<_, CrabaseError>(acc.or(one))
+                })?;
             Ok(Translated::new(
                 col("file_tags")
                     .list()
@@ -1153,24 +1150,23 @@ fn translate_file_method(method: &str, args: &[AstExpr], ctx: &TranslateCtx) -> 
             ))
         }
         "hasLink" => {
-            let needles: Vec<String> = args
+            let predicate = args
                 .iter()
                 .map(string_literal)
-                .collect::<Result<Vec<_>>>()?;
-            let mut predicate: Expr = lit(false);
-            for needle in &needles {
-                let with_slash = format!("/{needle}");
-                let md = format!("{needle}.md");
-                let with_slash_md = format!("/{needle}.md");
-                let elem = col("");
-                let one = elem
-                    .clone()
-                    .eq(lit(needle.clone()))
-                    .or(elem.clone().str().ends_with(lit(with_slash)))
-                    .or(elem.clone().eq(lit(md)))
-                    .or(elem.str().ends_with(lit(with_slash_md)));
-                predicate = predicate.or(one);
-            }
+                .try_fold(lit(false), |acc, needle| {
+                    let needle = needle?;
+                    let with_slash = format!("/{needle}");
+                    let md = format!("{needle}.md");
+                    let with_slash_md = format!("/{needle}.md");
+                    let elem = col("");
+                    let one = elem
+                        .clone()
+                        .eq(lit(needle))
+                        .or(elem.clone().str().ends_with(lit(with_slash)))
+                        .or(elem.clone().eq(lit(md)))
+                        .or(elem.str().ends_with(lit(with_slash_md)));
+                    Ok::<_, CrabaseError>(acc.or(one))
+                })?;
             Ok(Translated::new(
                 col("file_links")
                     .list()

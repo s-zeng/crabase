@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
@@ -49,34 +49,49 @@ pub fn obsidian_sort_key(s: &str) -> String {
 
 fn natural_key_inner(s: &str, collapse_punctuation: bool) -> String {
     const PAD: usize = 16;
-    let mut out = String::with_capacity(s.len() + 16);
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c.is_ascii_digit() {
-            let mut num = String::new();
-            num.push(c);
-            while let Some(&n) = chars.peek() {
-                if n.is_ascii_digit() {
-                    num.push(n);
-                    chars.next();
-                } else {
-                    break;
-                }
+    let mut out = String::with_capacity(s.len() + PAD);
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_digit() {
+            // Walk to the end of the digit run on the underlying bytes — ASCII
+            // digits never appear inside a multi-byte UTF-8 sequence, so this
+            // index arithmetic is safe.
+            let run_start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
             }
-            let trimmed: &str = num.trim_start_matches('0');
+            let digits = &s[run_start..i];
+            let trimmed = digits.trim_start_matches('0');
             let trimmed = if trimmed.is_empty() { "0" } else { trimmed };
             if trimmed.len() < PAD {
-                for _ in 0..(PAD - trimmed.len()) {
-                    out.push('0');
-                }
+                out.extend(std::iter::repeat_n('0', PAD - trimmed.len()));
             }
             out.push_str(trimmed);
-        } else if collapse_punctuation && !c.is_alphanumeric() && c != '/' {
+            continue;
+        }
+        // Anything below 0x80 is a one-byte ASCII char and can be appended
+        // without going through char decoding.
+        if b < 0x80 {
+            let c = b as char;
+            if collapse_punctuation && !c.is_alphanumeric() && c != '/' {
+                out.push(' ');
+            } else if c.is_ascii_uppercase() {
+                out.push((b | 0x20) as char);
+            } else {
+                out.push(c);
+            }
+            i += 1;
+            continue;
+        }
+        // Multi-byte UTF-8 char: decode once and lowercase.
+        let c = s[i..].chars().next().expect("valid utf8");
+        i += c.len_utf8();
+        if collapse_punctuation && !c.is_alphanumeric() && c != '/' {
             out.push(' ');
         } else {
-            for lc in c.to_lowercase() {
-                out.push(lc);
-            }
+            out.extend(c.to_lowercase());
         }
     }
     out
@@ -191,47 +206,46 @@ struct CanvasLinks {
 }
 
 fn collect_canvas_links(vault_root: &Path) -> Result<Vec<CanvasLinks>> {
-    let mut out = Vec::new();
-    for entry in WalkDir::new(vault_root)
+    WalkDir::new(vault_root)
         .follow_links(false)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("canvas"))
-    {
-        let abs_path = entry.path();
-        let rel_path = abs_path
-            .strip_prefix(vault_root)
-            .map_err(|e| CrabaseError::Io(std::io::Error::other(e.to_string())))?
-            .to_string_lossy()
-            .replace('\\', "/");
-        let Ok(content) = std::fs::read_to_string(abs_path) else {
-            continue;
-        };
-        // Canvas files are JSON; the embedded note bodies live in `text`
-        // properties on text nodes. We just extract the strings without
-        // parsing the JSON — the wikilink regex is unambiguous against the
-        // surrounding JSON syntax.
-        let mut links = extract_wikilinks(&content);
-        // The structured form `"file": "path/to/note.md"` also counts as a
-        // link to that file. Pull those out by hand.
-        for line in content.lines() {
-            if let Some(idx) = line.find("\"file\":") {
-                let rest = &line[idx + 7..];
-                if let Some(start) = rest.find('"') {
-                    let after = &rest[start + 1..];
-                    if let Some(end) = after.find('"') {
-                        let target = &after[..end];
-                        if !target.is_empty() {
-                            links.push(target.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        out.push(CanvasLinks { rel_path, links });
-    }
-    Ok(out)
+        .filter_map(|entry| {
+            let abs_path = entry.path();
+            let rel_path = abs_path
+                .strip_prefix(vault_root)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let content = std::fs::read_to_string(abs_path).ok()?;
+            // Canvas files are JSON; the embedded note bodies live in `text`
+            // properties on text nodes. We just extract the strings without
+            // parsing the JSON — the wikilink regex is unambiguous against the
+            // surrounding JSON syntax.
+            let mut links = extract_wikilinks(&content);
+            // The structured form `"file": "path/to/note.md"` also counts as a
+            // link to that file. Pull those out by hand.
+            links.extend(extract_canvas_file_refs(&content));
+            Some(Ok(CanvasLinks { rel_path, links }))
+        })
+        .collect()
+}
+
+/// Yield the string targets of `"file": "..."` JSON entries (one per line).
+/// Canvases store note references this way alongside the inline wikilinks the
+/// regex pass already catches.
+fn extract_canvas_file_refs(content: &str) -> impl Iterator<Item = String> + '_ {
+    content.lines().filter_map(|line| {
+        let idx = line.find("\"file\":")?;
+        let rest = &line[idx + "\"file\":".len()..];
+        let start = rest.find('"')?;
+        let after = &rest[start + 1..];
+        let end = after.find('"')?;
+        let target = &after[..end];
+        (!target.is_empty()).then(|| target.to_string())
+    })
 }
 
 fn read_raw_file(vault_root: &Path, abs_path: &Path) -> Result<RawFile> {
@@ -266,15 +280,12 @@ fn read_raw_file(vault_root: &Path, abs_path: &Path) -> Result<RawFile> {
     let ctime = meta.created().ok().and_then(systime_to_naive);
     let content = std::fs::read_to_string(abs_path)?;
     let (frontmatter, body) = parse_frontmatter(&content);
-    let tags = extract_frontmatter_tags(&frontmatter)
+    let mut seen_tags: HashSet<String> = HashSet::new();
+    let tags: Vec<String> = extract_frontmatter_tags(&frontmatter)
         .into_iter()
         .chain(extract_inline_tags(&body))
-        .fold(Vec::new(), |mut acc, tag| {
-            if !acc.contains(&tag) {
-                acc.push(tag);
-            }
-            acc
-        });
+        .filter(|t| seen_tags.insert(t.clone()))
+        .collect();
     // Obsidian counts frontmatter wikilinks only when the *entire* string
     // value (or each element of a sequence) is a single `[[…]]` token — i.e.
     // a property that Obsidian itself recognizes as a typed link. Inline
@@ -478,6 +489,10 @@ fn extract_inline_frontmatter_wikilinks(
 fn strip_code_regions(content: &str) -> String {
     let bytes = content.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    // Append `count` ASCII spaces to `out` in a single resize call.
+    let blank_out = |out: &mut Vec<u8>, count: usize| {
+        out.resize(out.len() + count, b' ');
+    };
     let mut i = 0;
     let mut at_line_start = true;
     while i < bytes.len() {
@@ -485,10 +500,7 @@ fn strip_code_regions(content: &str) -> String {
         // Fenced code block: look for ``` (or more) at line start. Closes on
         // the next line that starts with the same fence char and >= fence len.
         if at_line_start && b == b'`' {
-            let mut fence_len = 0;
-            while i + fence_len < bytes.len() && bytes[i + fence_len] == b'`' {
-                fence_len += 1;
-            }
+            let fence_len = bytes[i..].iter().take_while(|&&c| c == b'`').count();
             if fence_len >= 3 {
                 // Consume the fence-open line entirely (including any info string).
                 let line_end = bytes[i..]
@@ -496,9 +508,7 @@ fn strip_code_regions(content: &str) -> String {
                     .position(|&c| c == b'\n')
                     .map(|p| i + p)
                     .unwrap_or(bytes.len());
-                for _ in i..line_end {
-                    out.push(b' ');
-                }
+                blank_out(&mut out, line_end - i);
                 i = line_end;
                 if i < bytes.len() {
                     out.push(b'\n');
@@ -517,34 +527,22 @@ fn strip_code_regions(content: &str) -> String {
                         .iter()
                         .position(|&c| c != b' ' && c != b'\t')
                         .unwrap_or(line.len());
-                    let mut close_len = 0;
-                    while trimmed_start + close_len < line.len()
-                        && line[trimmed_start + close_len] == b'`'
-                    {
-                        close_len += 1;
-                    }
+                    let close_len = line[trimmed_start..]
+                        .iter()
+                        .take_while(|&&c| c == b'`')
+                        .count();
                     let only_fence = trimmed_start + close_len == line.len()
                         || line[trimmed_start + close_len..]
                             .iter()
                             .all(|&c| c == b' ' || c == b'\t');
-                    if close_len >= fence_len && only_fence {
-                        for _ in line_start..line_end {
-                            out.push(b' ');
-                        }
-                        i = line_end;
-                        if i < bytes.len() {
-                            out.push(b'\n');
-                            i += 1;
-                        }
-                        break;
-                    }
-                    for _ in line_start..line_end {
-                        out.push(b' ');
-                    }
+                    blank_out(&mut out, line_end - line_start);
                     i = line_end;
                     if i < bytes.len() {
                         out.push(b'\n');
                         i += 1;
+                    }
+                    if close_len >= fence_len && only_fence {
+                        break;
                     }
                 }
                 at_line_start = true;
@@ -554,35 +552,25 @@ fn strip_code_regions(content: &str) -> String {
         // Inline code span: `..` or ``..`` etc. Match same-count backticks
         // on the same line (Obsidian only crosses lines for fenced blocks).
         if b == b'`' {
-            let mut tick_len = 0;
-            while i + tick_len < bytes.len() && bytes[i + tick_len] == b'`' {
-                tick_len += 1;
-            }
-            let scan_start = i + tick_len;
-            let mut j = scan_start;
+            let tick_len = bytes[i..].iter().take_while(|&&c| c == b'`').count();
+            let mut j = i + tick_len;
             let mut closed_at: Option<usize> = None;
             while j < bytes.len() {
-                if bytes[j] == b'\n' {
-                    break;
-                }
-                if bytes[j] == b'`' {
-                    let mut k = 0;
-                    while j + k < bytes.len() && bytes[j + k] == b'`' {
-                        k += 1;
+                match bytes[j] {
+                    b'\n' => break,
+                    b'`' => {
+                        let k = bytes[j..].iter().take_while(|&&c| c == b'`').count();
+                        if k == tick_len {
+                            closed_at = Some(j);
+                            break;
+                        }
+                        j += k;
                     }
-                    if k == tick_len {
-                        closed_at = Some(j);
-                        break;
-                    }
-                    j += k;
-                    continue;
+                    _ => j += 1,
                 }
-                j += 1;
             }
             if let Some(end) = closed_at {
-                for _ in i..end + tick_len {
-                    out.push(b' ');
-                }
+                blank_out(&mut out, end + tick_len - i);
                 i = end + tick_len;
                 at_line_start = false;
                 continue;
@@ -602,21 +590,19 @@ fn strip_code_regions(content: &str) -> String {
 fn extract_wikilinks(content: &str) -> Vec<String> {
     let stripped = strip_code_regions(content);
     let mut links = Vec::new();
-    let mut i = 0;
     let bytes = stripped.as_bytes();
+    let mut i = 0;
     while i + 1 < bytes.len() {
         if bytes[i] == b'[' && bytes[i + 1] == b'[' {
             let start = i + 2;
-            let end = stripped[start..].find("]]").map(|pos| start + pos);
-            if let Some(end) = end {
+            if let Some(rel_end) = stripped[start..].find("]]") {
+                let end = start + rel_end;
                 let inner = &stripped[start..end];
                 // Drop the alias/anchor suffix: the link target is everything
                 // before the first `|` or `#`. Obsidian resolves
                 // `[[Colossians 4#16|Colossians 4:16]]` as a backlink to
                 // `Colossians 4`, not to `Colossians 4#16`.
-                let cut = inner
-                    .find(|c: char| c == '|' || c == '#')
-                    .unwrap_or(inner.len());
+                let cut = inner.find(['|', '#']).unwrap_or(inner.len());
                 let link_target = inner[..cut].trim();
                 if !link_target.is_empty() {
                     links.push(link_target.to_string());
@@ -636,9 +622,13 @@ fn build_dataframe(
     raw_files: Vec<RawFile>,
     canvas_links: Vec<CanvasLinks>,
 ) -> Result<(DataFrame, VaultSchema)> {
+    // Compute backlinks first while we still hold a borrow of raw_files.
+    let backlinks_per_file = compute_backlinks(&raw_files, &canvas_links);
     let n = raw_files.len();
 
-    // Fixed file metadata columns -------------------------------------------
+    // Drain raw_files into per-column Vecs by move. Each frontmatter map is
+    // stashed in `frontmatters` so the frontmatter-column pass below can still
+    // see it without keeping the RawFile alive.
     let mut file_path = Vec::with_capacity(n);
     let mut file_name = Vec::with_capacity(n);
     let mut file_folder = Vec::with_capacity(n);
@@ -648,27 +638,42 @@ fn build_dataframe(
     let mut file_mtime = Vec::with_capacity(n);
     let mut file_tags: Vec<Series> = Vec::with_capacity(n);
     let mut file_links: Vec<Series> = Vec::with_capacity(n);
+    let mut file_path_natkey: Vec<String> = Vec::with_capacity(n);
+    let mut file_name_natkey: Vec<String> = Vec::with_capacity(n);
+    let mut frontmatters: Vec<BTreeMap<String, serde_yaml::Value>> = Vec::with_capacity(n);
 
-    for f in &raw_files {
-        file_path.push(f.rel_path.clone());
-        file_name.push(f.stem.clone());
-        file_folder.push(f.folder.clone());
-        file_ext.push(f.ext.clone());
-        file_size.push(f.size);
-        file_ctime.push(f.ctime.map(naive_to_micros));
-        file_mtime.push(f.mtime.map(naive_to_micros));
-        file_tags.push(Series::new("".into(), &f.tags));
-        file_links.push(Series::new("".into(), &f.links));
+    for f in raw_files {
+        let RawFile {
+            rel_path,
+            stem,
+            ext,
+            folder,
+            size,
+            ctime,
+            mtime,
+            frontmatter,
+            tags,
+            links,
+            all_links: _,
+        } = f;
+        file_size.push(size);
+        file_ctime.push(ctime.map(naive_to_micros));
+        file_mtime.push(mtime.map(naive_to_micros));
+        file_tags.push(Series::new("".into(), tags));
+        file_links.push(Series::new("".into(), links));
+        file_path_natkey.push(natural_sort_key(&rel_path));
+        file_name_natkey.push(natural_sort_key(&stem));
+        file_path.push(rel_path);
+        file_name.push(stem);
+        file_folder.push(folder);
+        file_ext.push(ext);
+        frontmatters.push(frontmatter);
     }
 
-    let backlinks_per_file = compute_backlinks(&raw_files, &canvas_links);
     let file_backlinks: Vec<Series> = backlinks_per_file
         .into_iter()
-        .map(|links| Series::new("".into(), &links))
+        .map(|links| Series::new("".into(), links))
         .collect();
-
-    let file_path_natkey: Vec<String> = file_path.iter().map(|s| natural_sort_key(s)).collect();
-    let file_name_natkey: Vec<String> = file_name.iter().map(|s| natural_sort_key(s)).collect();
 
     let mut columns: Vec<Column> = vec![
         Column::new("file_path".into(), file_path),
@@ -685,37 +690,34 @@ fn build_dataframe(
         Column::new("file_name_natkey".into(), file_name_natkey),
     ];
 
-    // Frontmatter columns ---------------------------------------------------
+    // Frontmatter columns. BTreeSet gives us unique, sorted keys in one pass.
     let reserved: HashSet<&str> = FILE_META_COLUMNS.iter().copied().collect();
-    let mut all_keys: HashSet<String> = HashSet::new();
-    for f in &raw_files {
-        for k in f.frontmatter.keys() {
-            all_keys.insert(k.clone());
-        }
-    }
-    let mut ordered_keys: Vec<String> = all_keys.into_iter().collect();
-    ordered_keys.sort();
+    let ordered_keys: BTreeSet<&str> = frontmatters
+        .iter()
+        .flat_map(|fm| fm.keys().map(String::as_str))
+        .collect();
 
-    let mut frontmatter_keys: HashMap<String, String> = HashMap::new();
-    for key in &ordered_keys {
-        let column_name = if reserved.contains(key.as_str()) {
+    let mut frontmatter_keys: HashMap<String, String> = HashMap::with_capacity(ordered_keys.len());
+    let mut taken: HashSet<String> = HashSet::with_capacity(ordered_keys.len());
+    for key in ordered_keys {
+        let column_name = if reserved.contains(key) {
             format!("note_{key}")
         } else {
-            key.clone()
+            key.to_string()
         };
-        if frontmatter_keys.values().any(|v| v == &column_name) {
+        if !taken.insert(column_name.clone()) {
             return Err(CrabaseError::Query(format!(
                 "Frontmatter key collision producing column '{column_name}' from multiple sources"
             )));
         }
-        let values: Vec<&serde_yaml::Value> = raw_files
+        let values: Vec<&serde_yaml::Value> = frontmatters
             .iter()
-            .map(|f| f.frontmatter.get(key).unwrap_or(&serde_yaml::Value::Null))
+            .map(|fm| fm.get(key).unwrap_or(&serde_yaml::Value::Null))
             .collect();
         let dtype = infer_dtype(&values);
         let column = build_frontmatter_column(&column_name, &values, &dtype)?;
         columns.push(column);
-        frontmatter_keys.insert(key.clone(), column_name);
+        frontmatter_keys.insert(key.to_string(), column_name);
     }
 
     let df = DataFrame::new(columns)?;
@@ -740,8 +742,6 @@ fn naive_to_micros(dt: NaiveDateTime) -> i64 {
 ///     folder, then alphabetic) — Obsidian's "shortest path that uniquely
 ///     identifies" rule reduces to this in practice.
 fn compute_backlinks(raw_files: &[RawFile], canvas_links: &[CanvasLinks]) -> Vec<Vec<String>> {
-    use std::collections::HashMap;
-
     let mut by_stem: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut by_path: HashMap<&str, &str> = HashMap::new();
     let mut by_path_no_ext: HashMap<&str, &str> = HashMap::new();
@@ -761,8 +761,10 @@ fn compute_backlinks(raw_files: &[RawFile], canvas_links: &[CanvasLinks]) -> Vec
         paths.sort_unstable();
     }
 
-    let mut targets: HashMap<String, Vec<String>> = HashMap::new();
-    let resolve = |link: &str, source_folder: &str| -> Option<String> {
+    // Borrowed-key map: linker paths are alive for the duration of the
+    // computation, so we never need to clone them while filling the map.
+    let mut targets: HashMap<&str, Vec<&str>> = HashMap::new();
+    let resolve = |link: &str, source_folder: &str| -> Option<&str> {
         by_path
             .get(link)
             .copied()
@@ -772,12 +774,11 @@ fn compute_backlinks(raw_files: &[RawFile], canvas_links: &[CanvasLinks]) -> Vec
                     .get(link)
                     .map(|candidates| resolve_closest(candidates, source_folder))
             })
-            .map(str::to_string)
     };
     for f in raw_files {
         for link in &f.all_links {
             if let Some(target) = resolve(link.as_str(), f.folder.as_str()) {
-                targets.entry(target).or_default().push(f.rel_path.clone());
+                targets.entry(target).or_default().push(f.rel_path.as_str());
             }
         }
     }
@@ -785,7 +786,7 @@ fn compute_backlinks(raw_files: &[RawFile], canvas_links: &[CanvasLinks]) -> Vec
         let folder = c.rel_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
         for link in &c.links {
             if let Some(target) = resolve(link.as_str(), folder) {
-                targets.entry(target).or_default().push(c.rel_path.clone());
+                targets.entry(target).or_default().push(c.rel_path.as_str());
             }
         }
     }
@@ -793,13 +794,12 @@ fn compute_backlinks(raw_files: &[RawFile], canvas_links: &[CanvasLinks]) -> Vec
     raw_files
         .iter()
         .map(|f| {
-            let mut v: Vec<String> = targets
-                .get(f.rel_path.as_str())
-                .cloned()
-                .unwrap_or_default();
-            v.sort();
+            let Some(mut v) = targets.remove(f.rel_path.as_str()) else {
+                return Vec::new();
+            };
+            v.sort_unstable();
             v.dedup();
-            v
+            v.into_iter().map(str::to_string).collect()
         })
         .collect()
 }
@@ -1014,8 +1014,7 @@ fn build_frontmatter_column(
             Ok(s.into_column())
         }
         DataType::List(inner) if **inner == DataType::String => {
-            let mut items_per_row: Vec<Option<Series>> = Vec::with_capacity(values.len());
-            for v in values {
+            let items_per_row = values.iter().map(|v| {
                 let items: Option<Vec<String>> = match v {
                     serde_yaml::Value::Sequence(seq) => {
                         Some(seq.iter().map(yaml_value_to_string_cell).collect())
@@ -1027,9 +1026,9 @@ fn build_frontmatter_column(
                     serde_yaml::Value::Null => None,
                     other => Some(vec![yaml_value_to_string_cell(other)]),
                 };
-                items_per_row.push(items.map(|xs| Series::new("".into(), &xs)));
-            }
-            let chunked: ListChunked = ListChunked::from_iter(items_per_row.into_iter());
+                items.map(|xs| Series::new("".into(), xs))
+            });
+            let chunked: ListChunked = ListChunked::from_iter(items_per_row);
             let series = chunked.into_series().with_name(name.into());
             Ok(series.into_column())
         }

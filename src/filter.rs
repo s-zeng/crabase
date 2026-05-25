@@ -20,26 +20,12 @@ pub fn filter_node_to_expr(node: &FilterNode, ctx: &TranslateCtx) -> Result<Expr
 
 fn compile(node: &FilterNode, ctx: &TranslateCtx) -> Result<Expr> {
     match node {
-        FilterNode::And(children) => {
-            if children.is_empty() {
-                return Ok(lit(true));
-            }
-            let mut iter = children.iter();
-            let first = compile(iter.next().unwrap(), ctx)?;
-            iter.try_fold(first, |acc, child| Ok(acc.and(compile(child, ctx)?)))
-        }
-        FilterNode::Or(children) => {
-            if children.is_empty() {
-                return Ok(lit(false));
-            }
-            let mut iter = children.iter();
-            let first = compile(iter.next().unwrap(), ctx)?;
-            iter.try_fold(first, |acc, child| Ok(acc.or(compile(child, ctx)?)))
-        }
+        FilterNode::And(children) => fold_children(children, ctx, lit(true), Expr::and),
+        FilterNode::Or(children) => fold_children(children, ctx, lit(false), Expr::or),
         FilterNode::Not(children) => {
-            // "none of these are true" → !any
-            let any = compile(&FilterNode::Or(children.clone()), ctx)?;
-            Ok(any.not())
+            // "none of these are true" → !any. Borrow children directly instead
+            // of cloning them just to wrap in another FilterNode::Or.
+            Ok(fold_children(children, ctx, lit(false), Expr::or)?.not())
         }
         FilterNode::Expr(expr_str) => {
             let ast = parse(expr_str)?;
@@ -47,6 +33,27 @@ fn compile(node: &FilterNode, ctx: &TranslateCtx) -> Result<Expr> {
             Ok(truthy(translated))
         }
     }
+}
+
+/// Reduce a child list into a single Expr via `combine`, using `empty` when the
+/// list has no children. Shared between And/Or/Not so each branch stays a
+/// one-liner.
+fn fold_children(
+    children: &[FilterNode],
+    ctx: &TranslateCtx,
+    empty: Expr,
+    combine: fn(Expr, Expr) -> Expr,
+) -> Result<Expr> {
+    children
+        .iter()
+        .try_fold(None::<Expr>, |acc, child| {
+            let next = compile(child, ctx)?;
+            Ok(Some(match acc {
+                Some(a) => combine(a, next),
+                None => next,
+            }))
+        })
+        .map(|opt| opt.unwrap_or(empty))
 }
 
 /// Combine global and view filters into a single predicate. Returns `lit(true)`
