@@ -106,6 +106,15 @@
           # importable. Use via `nix shell .#python-env` then `python3 -c ...`.
           packages.python-env = pythonForCrabase.withPackages (ps: [ ps.crabase ]);
 
+          # Test env: like `python-env` but also has pytest + syrupy for the
+          # snapshot suite under `crates/crabase-py/tests/`. Use via
+          #   nix shell .#python-test-env -c pytest crates/crabase-py
+          packages.python-test-env = pythonForCrabase.withPackages (ps: [
+            ps.crabase
+            ps.pytest
+            ps.syrupy
+          ]);
+
           # Rust dev environment
           devShells.default = pkgs.mkShell {
             inputsFrom = [

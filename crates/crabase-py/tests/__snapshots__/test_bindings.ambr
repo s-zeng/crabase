@@ -1,0 +1,134 @@
+# serializer version: 1
+# name: test_list_bases
+  '''
+  queries/notes.base
+  queries/projects.base
+  '''
+# ---
+# name: test_list_views_notes
+  list([
+    dict({
+      'group_by': None,
+      'limit': None,
+      'name': 'By Score',
+      'order': list([
+        'title',
+        'score',
+        'tags',
+        'done',
+      ]),
+      'sort': list([
+        dict({
+          'direction': 'DESC',
+          'property': 'score',
+        }),
+      ]),
+      'type': 'table',
+    }),
+    dict({
+      'group_by': None,
+      'limit': None,
+      'name': 'All',
+      'order': list([
+        'title',
+        'file.name',
+      ]),
+      'sort': None,
+      'type': 'table',
+    }),
+  ])
+# ---
+# name: test_list_views_projects
+  list([
+    dict({
+      'group_by': None,
+      'limit': None,
+      'name': 'Open',
+      'order': list([
+        'title',
+        'status',
+        'due',
+      ]),
+      'sort': list([
+        dict({
+          'direction': 'ASC',
+          'property': 'due',
+        }),
+      ]),
+      'type': 'table',
+    }),
+  ])
+# ---
+# name: test_query_all_view
+  '''
+  # schema: title: String, file.name: String
+  title,file.name
+  [[Notes/alpha.md| Alpha]],alpha
+  [[Notes/beta.md| Beta]],beta
+  [[Notes/gamma.md| Gamma]],gamma
+  
+  '''
+# ---
+# name: test_query_by_score
+  '''
+  # schema: title: String, score: Int64, tags: List(String), done: Boolean
+  title,score,tags,done
+  [[Notes/beta.md| Beta]],8,b,true
+  [[Notes/alpha.md| Alpha]],5,"a, b",false
+  [[Notes/gamma.md| Gamma]],3,a,false
+  
+  '''
+# ---
+# name: test_query_default_view_is_first
+  '''
+  # schema: title: String, score: Int64, tags: List(String), done: Boolean
+  title,score,tags,done
+  [[Notes/beta.md| Beta]],8,b,true
+  [[Notes/alpha.md| Alpha]],5,"a, b",false
+  [[Notes/gamma.md| Gamma]],3,a,false
+  
+  '''
+# ---
+# name: test_query_projects
+  '''
+  # schema: title: String, status: String, due: Date
+  title,status,due
+  [[Projects/project-2.md| Project Two]],done,2025-12-01
+  [[Projects/project-1.md| Project One]],active,2026-01-15
+  
+  '''
+# ---
+# name: test_scan_vault_rows
+  '''
+  # schema: file_path: String, file_name: String, file_folder: String, file_ext: String, file_tags: List(String), file_links: List(String), file_backlinks: List(String), file_path_natkey: String, file_name_natkey: String, done: Boolean, due: Date, score: Int64, status: String, tags: List(String), title: String
+  file_path,file_name,file_folder,file_ext,file_tags,file_links,file_backlinks,file_path_natkey,file_name_natkey,done,due,score,status,tags,title
+  Notes/alpha.md,alpha,Notes,md,"a, b, alpha, project",gamma,Notes/beta.md,notes/alpha.md,alpha,false,,5,,"a, b",Alpha
+  Notes/beta.md,beta,Notes,md,"b, beta","alpha, gamma","",notes/beta.md,beta,true,,8,,b,Beta
+  Notes/gamma.md,gamma,Notes,md,a,"","Notes/alpha.md, Notes/beta.md",notes/gamma.md,gamma,false,,3,,a,Gamma
+  Projects/project-1.md,project-1,Projects,md,project,"","",projects/project-0000000000000001.md,project-0000000000000001,,2026-01-15,,active,,Project One
+  Projects/project-2.md,project-2,Projects,md,"","","",projects/project-0000000000000002.md,project-0000000000000002,,2025-12-01,,done,,Project Two
+  
+  '''
+# ---
+# name: test_scan_vault_schema
+  '''
+  done: Boolean
+  due: Date
+  file_backlinks: List(String)
+  file_ctime: Datetime(time_unit='us', time_zone=None)
+  file_ext: String
+  file_folder: String
+  file_links: List(String)
+  file_mtime: Datetime(time_unit='us', time_zone=None)
+  file_name: String
+  file_name_natkey: String
+  file_path: String
+  file_path_natkey: String
+  file_size: UInt64
+  file_tags: List(String)
+  score: Int64
+  status: String
+  tags: List(String)
+  title: String
+  '''
+# ---

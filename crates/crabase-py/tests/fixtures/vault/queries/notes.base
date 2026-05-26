@@ -1,0 +1,19 @@
+filters:
+  and:
+    - "file.inFolder(\"Notes\")"
+views:
+  - type: table
+    name: "By Score"
+    order:
+      - title
+      - score
+      - tags
+      - done
+    sort:
+      - property: score
+        direction: DESC
+  - type: table
+    name: "All"
+    order:
+      - title
+      - file.name

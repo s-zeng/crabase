@@ -77,6 +77,34 @@ cargo insta accept
 - Accept valid changes with `cargo insta accept` or reject with `cargo insta reject`
 - Never commit `.snap.new` files - these are pending snapshot updates
 
+### Python snapshot tests
+
+The Python bindings have their own snapshot suite under `crates/crabase-py/tests/`,
+using `syrupy` (the Python analog of insta) on top of `pytest`. The conventions
+mirror the Rust side: one assertion per test, deterministic outputs only.
+
+Helpers in `conftest.py`:
+- `df_to_snapshot(df)` — renders a polars `DataFrame` as `# schema:`-prefixed
+  CSV with filesystem-volatile columns (`file_size`, `file_ctime`, `file_mtime`)
+  stripped and list cells joined to strings (CSV can't carry nested data).
+- `schema_to_snapshot(df)` — column-name-sorted `name: dtype` lines for
+  asserting the full vault schema without exposing row content.
+
+Run, update, and review:
+```bash
+# Run the suite (assumes crabase + polars are already built/installed)
+nix shell .#python-test-env -c pytest crates/crabase-py
+
+# After the bindings change, regenerate snapshots
+nix shell .#python-test-env -c pytest crates/crabase-py --snapshot-update
+
+# Inspect uncommitted .ambr diffs the normal way (git diff)
+```
+
+The fixture vault under `crates/crabase-py/tests/fixtures/vault/` is intentionally
+small and self-contained — it places `.base` files *inside* the vault so the
+suite exercises the same vault-relative path semantics that real users see.
+
 ## Version control
 
 This project uses jujutsu `jj` for version control
@@ -149,6 +177,16 @@ crates/
     python/crabase/ - Pure-Python wrapper module that re-exports from the
                       compiled `_crabase`. Includes `_crabase.pyi` type stubs
                       that declare a TypedDict `ViewInfo` for list_views.
+    tests/        - Python snapshot test suite (syrupy + pytest). Mirrors
+                    the insta convention from the Rust side: one assertion
+                    per test, deterministic snapshots, volatile filesystem
+                    columns (file_size / file_ctime / file_mtime) stripped
+                    from row snapshots while still present in the schema
+                    snapshot.
+      fixtures/vault/ - Self-contained test vault with `.base` files
+                        located inside the vault (so `list_bases` finds
+                        them and `query()` takes vault-relative paths).
+      __snapshots__/ - syrupy `.ambr` snapshot files (committed).
 ```
 
 ## Python bindings
@@ -172,7 +210,7 @@ deserialise frames produced by Rust polars 0.46.
 
 ### Nix integration
 
-The flake exposes three relevant Python outputs (all version-pinned correctly):
+The flake exposes four relevant Python outputs (all version-pinned correctly):
 
 - `packages.crabase-py` — the bare Python package, for adding to systemPackages
   or piping into another `python.withPackages`.
@@ -181,6 +219,9 @@ The flake exposes three relevant Python outputs (all version-pinned correctly):
   ps.numpy ])`.
 - `packages.python-env` — a ready-to-run Python with `crabase` pre-installed.
   Usage: `nix shell .#python-env` then `python3 -c "import crabase"`.
+- `packages.python-test-env` — like `python-env` but also has `pytest` and
+  `syrupy`. Used to run the Python snapshot suite:
+  `nix shell .#python-test-env -c pytest crates/crabase-py`.
 
 The pinned `polars` wheel is fetched from PyPI (not the nixpkgs build-from-
 source derivation) because nixpkgs ships polars >=1.30 which is ABI-

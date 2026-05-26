@@ -13,3 +13,7 @@ dependencies = ["polars>=0.20"]
 python-source = "python"
 module-name = "crabase._crabase"
 features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

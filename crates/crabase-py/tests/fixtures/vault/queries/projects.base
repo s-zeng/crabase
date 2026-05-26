@@ -1,0 +1,13 @@
+filters:
+  and:
+    - "file.inFolder(\"Projects\")"
+views:
+  - type: table
+    name: "Open"
+    order:
+      - title
+      - status
+      - due
+    sort:
+      - property: due
+        direction: ASC
