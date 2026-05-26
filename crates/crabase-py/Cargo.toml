@@ -1,0 +1,14 @@
+[package]
+name = "crabase-py"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "_crabase"
+crate-type = ["cdylib"]
+
+[dependencies]
+crabase = { path = "../..", package = "crabase" }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+pyo3-polars = { version = "0.20", features = ["lazy"] }
+polars = { version = "0.46", default-features = false, features = ["lazy"] }

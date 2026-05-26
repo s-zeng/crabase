@@ -1,6 +1,8 @@
-/target
+target/
 /result
 /result-lib
 .direnv
+__pycache__/
+*.so
 
 /.pre-commit-config.yaml

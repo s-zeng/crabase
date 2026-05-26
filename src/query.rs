@@ -13,9 +13,10 @@ use crate::expr::{InferredType, TranslateCtx, parse, translate};
 use crate::filter::combine_filters;
 use crate::vault::{VaultSchema, obsidian_sort_key, scan_vault_to_lazyframe};
 
-/// Execute a query against the vault for a given view, returning the result as
-/// a polars `DataFrame`. Column order matches `view.order`.
-pub fn execute_query(vault_root: &Path, base_file: &BaseFile, view: &View) -> Result<DataFrame> {
+/// Build the lazy query for a view without materialising it. Returns a
+/// `LazyFrame` whose schema matches `view.order`; the caller chooses when (or
+/// whether) to `.collect()`. This is the form the Python bindings expose.
+pub fn build_query_lazy(vault_root: &Path, base_file: &BaseFile, view: &View) -> Result<LazyFrame> {
     let (mut lf, schema) = scan_vault_to_lazyframe(vault_root)?;
     let ctx = TranslateCtx::new(&schema, &base_file.formulas);
 
@@ -37,7 +38,13 @@ pub fn execute_query(vault_root: &Path, base_file: &BaseFile, view: &View) -> Re
     }
 
     let column_exprs = column_select_exprs(view, &ctx, &schema)?;
-    let df = lf.select(column_exprs).collect()?;
+    Ok(lf.select(column_exprs))
+}
+
+/// Execute a query against the vault for a given view, returning the result as
+/// a polars `DataFrame`. Column order matches `view.order`.
+pub fn execute_query(vault_root: &Path, base_file: &BaseFile, view: &View) -> Result<DataFrame> {
+    let df = build_query_lazy(vault_root, base_file, view)?.collect()?;
     Ok(df)
 }
 

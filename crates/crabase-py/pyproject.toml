@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "crabase"
+version = "0.1.0"
+description = "Query Obsidian bases from Python via polars"
+requires-python = ">=3.9"
+dependencies = ["polars>=0.20"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "crabase._crabase"
+features = ["pyo3/extension-module"]

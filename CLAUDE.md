@@ -99,7 +99,9 @@ src/
                     Datetime / List[String] / String), and assembles every file
                     into a single LazyFrame plus a VaultSchema describing it
   filter.rs       - Compiles a FilterNode tree into a polars `Expr` predicate
-  query.rs        - Orchestrator: filter → sort_by_exprs → limit → select → collect
+  query.rs        - Orchestrator: filter → sort_by_exprs → limit → select.
+                    `build_query_lazy` returns the LazyFrame; `execute_query`
+                    is a thin wrapper that calls `.collect()` on top.
   output.rs       - DataFrame → CSV (`write_csv`) and TOON (`write_toon`) writers.
                     CSV uses custom row iteration matching the legacy quoting
                     rules (Polars's built-in CsvWriter is NOT used; preserves
@@ -128,7 +130,61 @@ tests/
     vault/        - Small test vault with .md files in Church/Sermons/ and Notes/
     test.base     - Test .base file with folder filter and table view
   snapshots/      - Insta snapshot files (committed)
+crates/
+  crabase-py/     - pyo3-based Python bindings. NOT a workspace member: it
+                    depends on pyo3-polars which would pull pyo3's link-time
+                    Python symbols into the root binary's build and fail to
+                    link. Built standalone via maturin from its own directory.
+    Cargo.toml    - cdylib crate, depends on the root `crabase` package via
+                    path. pyo3 0.23 + pyo3-polars 0.20 (matched to polars 0.46).
+    pyproject.toml - maturin build config; Python package name `crabase`.
+    src/lib.rs    - Exposes list_bases / list_views / query / scan_vault as
+                    #[pyfunction]s. Errors are mapped: ViewNotFound→KeyError,
+                    IO→FileNotFoundError, everything else→ValueError. `query`
+                    and `scan_vault` collect on the Rust side and return
+                    polars.DataFrame (pyo3-polars can't serialise the lazy
+                    plan because of the Expr::map in `string_sort_key`).
+                    Heavy work runs inside `py.allow_threads(...)` so Python
+                    stays responsive to signals (e.g. Ctrl-C).
+    python/crabase/ - Pure-Python wrapper module that re-exports from the
+                      compiled `_crabase`. Includes `_crabase.pyi` type stubs
+                      that declare a TypedDict `ViewInfo` for list_views.
 ```
+
+## Python bindings
+
+```python
+import crabase
+crabase.list_bases(vault="/path/to/vault")           # -> list[str]
+crabase.list_views("queries/notes.base", vault=...)  # -> list[ViewInfo dict]
+crabase.query("queries/notes.base", view="By Date")  # -> polars.DataFrame
+crabase.scan_vault(vault="/path/to/vault")           # -> polars.DataFrame
+```
+
+Build/install during development (must be in `nix develop`):
+```
+cd crates/crabase-py
+maturin develop --release
+```
+The Python `polars` version must be ABI-compatible with the Rust `polars`
+version (0.46 ↔ Python `polars==1.22.x`); newer Python polars versions can't
+deserialise frames produced by Rust polars 0.46.
+
+### Nix integration
+
+The flake exposes three relevant Python outputs (all version-pinned correctly):
+
+- `packages.crabase-py` — the bare Python package, for adding to systemPackages
+  or piping into another `python.withPackages`.
+- `packages.python` — a Python interpreter whose package set has `polars` (1.22)
+  and `crabase` already injected. Compose with `withPackages (ps: [ ps.crabase
+  ps.numpy ])`.
+- `packages.python-env` — a ready-to-run Python with `crabase` pre-installed.
+  Usage: `nix shell .#python-env` then `python3 -c "import crabase"`.
+
+The pinned `polars` wheel is fetched from PyPI (not the nixpkgs build-from-
+source derivation) because nixpkgs ships polars >=1.30 which is ABI-
+incompatible with our Rust polars 0.46.
 
 ## CLI Usage
 

@@ -1,3 +1,9 @@
+# crates/crabase-py is intentionally NOT a workspace member: it depends on
+# polars+pyo3 features that would unify into this binary's build and break
+# linking. It's built independently via maturin from its own directory.
+[workspace]
+exclude = ["crates/crabase-py"]
+
 [package]
 authors = ["Simon Zeng <rust@simonzeng.ca>"]
 edition = "2024"
